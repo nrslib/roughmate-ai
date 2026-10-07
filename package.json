@@ -1,0 +1,38 @@
+{
+  "name": "roughmate-self-hosted",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "PolyForm-Shield-1.0.0",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint app scripts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-apigatewayv2": "^3.1143.0",
+    "@aws-sdk/client-dynamodb": "^3.1143.0",
+    "@aws-sdk/client-lambda": "^3.1143.0",
+    "@aws-sdk/client-s3": "^3.1143.0",
+    "@aws-sdk/client-secrets-manager": "^3.1143.0",
+    "@aws-sdk/client-sqs": "^3.1143.0",
+    "@aws-sdk/client-sts": "^3.1143.0",
+    "@aws-sdk/lib-dynamodb": "^3.1143.0",
+    "@inquirer/prompts": "^8.7.2",
+    "@slack/web-api": "^8.1.1",
+    "openai": "^7.25.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/aws-lambda": "^8.10.164",
+    "@types/node": "^26.6.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.11.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.0"
+  }
+}

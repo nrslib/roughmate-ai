@@ -1,0 +1,588 @@
+{
+  "schema": 1,
+  "sourceCommit": "e4411a4bca2345110c6d4d2ddb8e53e77a1c066e",
+  "allowlistSha256": "5fa2550f1fa76b5628272d5a51f802eb6c07f67fe9c4cb4fd7191383e8a4a804",
+  "retiredPathsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da",
+      "mode": "100755"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "a19c393236d4922824c0ad4e9e06b7f9ab4b89618fc71b6fe6dccbbe3c8db91f",
+      "mode": "100644"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "489dfb00a9f081c1be7e86e580074d1921f08976010829035bdbdfdff966558f",
+      "mode": "100644"
+    },
+    {
+      "path": "README.md",
+      "sha256": "76b47a716faa0d2f9a4cce57223c10f6b4dc9c1f1607282ccb2c1fd02f07c826",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/answer-edit.ts",
+      "sha256": "5289d04da3391bec26ddbc55ab66205a508f9292c7216c1b1060bcef3e2084c6",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/answer-evidence.ts",
+      "sha256": "4e473a6db3fce9c7331593aa100028d5c5441bd48d6dfe6b953481a23c5cd9a4",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/answer-question.ts",
+      "sha256": "b2ef4234f73738a25e2cc07472336005493bc29d6fa931d38fa7fef7aeedacad",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/aws-consultation-condition.ts",
+      "sha256": "b9b836f837426bb21acaa859a0d0241e401400176a5ee631c6c835411ec041b3",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/bot-maintenance.ts",
+      "sha256": "3d6058ed09847a94be9d41beb5f2fd33a0edc77ceafbddb63918ecdf30246ede",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/channel-audience.ts",
+      "sha256": "ac9f4418ec0099e936c121aa2d2267fcd131242c2e5dbae40df49d0551282f6a",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/channel-authorization.ts",
+      "sha256": "201eb539352ea3a05215beff8d4ab291365d1f65a5bfa32087871d1fe6fd986d",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/channel-membership.ts",
+      "sha256": "60148e2cae93a5341f37355ae940624e5407bc1e4bb6e56d0c138d82e8f885c4",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/configuration-tokens.ts",
+      "sha256": "0e4badebabb43b9bc748ccf9c9d79d08e936dd45b451c96bd060e1e1307b1c09",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/consultation-display.ts",
+      "sha256": "f135b0332dae73220283258ba226649bb42e0ef1694fde78919d034f872abd56",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/consultation-store.ts",
+      "sha256": "dee006abec582c5164bcf821b8552fc47d2e5bad10a93350b493d4dde620abde",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/contracts.ts",
+      "sha256": "54e2f1e3b52ca3a19d996c0c8e49275459177cc888b295b590c6e6ec4c20de0d",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/deadline.ts",
+      "sha256": "ac741275a3a1719e38e349fd9192d85d7401f8fdaf01b8f35398d589b10eb2b7",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/diagnostics.ts",
+      "sha256": "4b1baf6e964c286d0f54a2851b295de41ab0684c9702f3243470aa2107165046",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/groups.ts",
+      "sha256": "3b586b3e213a692f08445dc10b256fb0e6505393ee3c67628e9b2ec079c05976",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/http.ts",
+      "sha256": "5d1ff21ceffc130b208490b8521257494293d6cdf276d6e5f2d71dd6fa62ef45",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/knowledge-ui.ts",
+      "sha256": "e0ab4767b3c07b76e8e02e2d7f919c49aed9175b2728ecacb79ada166049965f",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/llm.ts",
+      "sha256": "e10bf4562ec137f70304d575b1db63b1953d2138654cc933c5a3053acb451d30",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/prompt-facets.ts",
+      "sha256": "a699ceb807012a7b2bbb063f98353c6b77149e92a7d8ecdf8ea192df8ef7c087",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/provisioner.ts",
+      "sha256": "914b18a21325fa2f170875fde2d9dc16e25ff4a1eb3c4f2125283c83414319ef",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/public-source.ts",
+      "sha256": "5687c89691680db3cdfc7b1ba306397a16d617d1018d19084f451cfb3dd43755",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/registration.ts",
+      "sha256": "ea37d9154faeaee50a847e7dcfb6cb0150f013b02c0dc61c81862a4432462df0",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/security.ts",
+      "sha256": "99296cab7c50b1fcfc492e78742eadf821a721650b1b9362310b21adbf945b95",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/slack.ts",
+      "sha256": "818a31447b74e0af154c5a4cb532f4eba40ad56b0c095b89928b5471d6f8ce82",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/storage.ts",
+      "sha256": "b6198f6e7031508a4ac5baee44c4f46fa8d9768a9135c36f5fc74f94b25996e0",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-access.ts",
+      "sha256": "5c4f161beb1a045775c70477f9c1ddb22547537be61ca0b06f0179235bf98539",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-adoption-origin.ts",
+      "sha256": "7146a97ceac2abda3926124139bb7199e0034c4c49ec8df0c4b72b97224d825d",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-adoption.ts",
+      "sha256": "1820781cab6d10710e190ba190828125cc14500e2eb1b7cf86443c15017c2a26",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-answer-proposal.ts",
+      "sha256": "b86a7b3fe74288973be34b8d0edba0b58916108850639253748cd74b673f306d",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-browsing.ts",
+      "sha256": "8528c6ca1fa00d2e04ff06db7358c7f9ec402b12cde871efddcc7f497db82db1",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-comparison.ts",
+      "sha256": "b3dfe1b44f59e8d657b4210805f4d3a664706bee592a0633bd9e052d3fbe1b43",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-content.ts",
+      "sha256": "12fa7fd026d656c876a2863244b4766eff3a4456815b10f49edf1e24eac266b2",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-contract.ts",
+      "sha256": "defcf01ac0423f34362ac6fce399fe749c7579ea278acedf93053b6c89fc57d1",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-erasure.ts",
+      "sha256": "580a9fce269475a7368d8cb4439a93b1f0b9beaa8e1ab2ee236a8f7a8815bd6b",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-maintenance.ts",
+      "sha256": "c255272ebf5ae615f88e539ab5967cde8b3aa10ef00e70a1077239214a154479",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-markdown.ts",
+      "sha256": "b658e02d90ed573760c636cb1d252833a4875cfedfd5c3c249f6d4040ca13edf",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-model.ts",
+      "sha256": "9d78c1612ccae5610d4383e04d92111b1377f8699ddafd0c7701f92991b63020",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-proposal-slack.ts",
+      "sha256": "1cac15ac8f7a8bbdc2390ae4c37b0f3c3cf5a6566c6475b316cb740a5ead9a10",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-provenance.ts",
+      "sha256": "e538612acf672ed53568a8350dae58a9b78d45e0ba6c88250008b78a19767e8a",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-queue.ts",
+      "sha256": "98c3f145d67c2b5457be54081e4d1af6fb65bf4f9a5d24af7b0336c6a7f1fbb5",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-retrieval.ts",
+      "sha256": "aa01b288e942b05ce4b9ccb9d9027fe56f1c95ad891ae0af6c29ca4dc4781002",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-runner.ts",
+      "sha256": "4068f04807512881b6410a7b6365de275fe2bf99bfce9bb637306a1c8c75fa13",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-storage.ts",
+      "sha256": "8073ca993fac182b1eb9851bb8d0ba1be1bfabca743ca16cf0c6f59574b5b574",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-ui.ts",
+      "sha256": "ba6029be391db668c1e21accd372f008635dd36011b641ff92e7c5c37d1ca57c",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-update-failure.ts",
+      "sha256": "b1796d64e575c5c3580c2336d2efcc00055cb27868756de4aeac3b8e1ad9008f",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-update-plan.ts",
+      "sha256": "97fdd99c7a0dcffa3e670263470e1c464e0e7d3b746fa88dd94252340f28ba71",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-view-state.ts",
+      "sha256": "e08e5b87e4b4f9eb53ef0fc0a0e7cac79ba2f4072cf16eeab522eac1bd84b2aa",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-web-auth.ts",
+      "sha256": "09a5ca4e02d8c190f8dc16689b09ad1839ac2feb0fa7545c45c8f5e6d6fda074",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-web-device.ts",
+      "sha256": "14cd2eba76dcb5240a17f5fac257920f43f9ab76a98f348ffd43da071329f242",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-web-ui.ts",
+      "sha256": "367b432d77b55e3540f0c772588436579f4ca9b79db404fc837f99de9ce4e5d8",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-web.ts",
+      "sha256": "a6a305a5e171eac4b87290b2d20f605db99b51bd77ccb25e568a6e77c90f10b2",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/wiki-worker.ts",
+      "sha256": "53ce4cda6370fbf1ba80be1d6b22902336f9b05ba86c5dd4e7efa504c17133cc",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/worker.ts",
+      "sha256": "6374671363a2fc20bd038096d0d46801b01aab5f71faef0d1172a2f52e70959a",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/workflow.ts",
+      "sha256": "507eb5b8fc93c495eb1efd0009d30e0446c3f9df5e92b64d3c652eeda642102a",
+      "mode": "100644"
+    },
+    {
+      "path": "docs/iam.md",
+      "sha256": "d1ea97ca874df1c6cc9619cb7c696205449b9e036cf61c6222ae0366cbfb152e",
+      "mode": "100644"
+    },
+    {
+      "path": "eslint.config.mjs",
+      "sha256": "0e970c7ac4bbaec7ea892a5d14f8acdeeee62546c0e4dcc6f0e338a5067bbb5c",
+      "mode": "100644"
+    },
+    {
+      "path": "examples-knowledge.json",
+      "sha256": "807c36c052886be74e6ae9d015c2ad0962c9575b1251ef2bbc70b54a465bf922",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/.terraform.lock.hcl",
+      "sha256": "89d1449207d4f741f149fba88f70496df3064b79caa62b34a6e498e8e6691829",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/main.tf",
+      "sha256": "68ea564433ff8bc49952518f69d6763703ea279b8b6e2eff1eacb17293176af6",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/outputs.tf",
+      "sha256": "f610ccafa789833ca8f7f9eac9838bdd33343ad4a85502d3fe39d92cfa97251e",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/registration.tf",
+      "sha256": "9393a921222454463166415e6caa4d525f722b2b3c96dbe3b7e4e667eced10ee",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/variables.tf",
+      "sha256": "0607468bf96dd6b46d6a6cada96caf5aabbd1e89ecdd4c53828537fcf4fc6f5d",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/versions.tf",
+      "sha256": "82003d23004f8f82819840f8ebadbb00c94e92ef4f45d64366eb95c47f245d63",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/aws/wiki.tf",
+      "sha256": "db8eea2a450f93a944ff8d591d974365f0032b1e56aad23975c1636a0a4db74e",
+      "mode": "100644"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "53792ceabc51a7ea221d55f9ee737a2d576ed703ab8077b0fc610240cf773d21",
+      "mode": "100644"
+    },
+    {
+      "path": "package.json",
+      "sha256": "ca9cb36f10b26b996c5cedd43296ad456341da26fdc4d67f72a6c2994acdbec9",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/bootstrap-state",
+      "sha256": "db8882e3992d911431ccf7581aa01cbbfddcda422655268b475df6df13495179",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/build.mjs",
+      "sha256": "1b81215f989658c63777372fbd5dba4617a3c7aa8ee89456945b1e9ad16505ff",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/cli.ts",
+      "sha256": "096f3d2e57c5146ddd47800666f39e8007f79c366b4c623df745a294209c620d",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/configure",
+      "sha256": "1c992e9bb88a64c57ec9ebe80c11e2ff7e1aa6f0cae3b6ed1c2b39d1b6a39fef",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/connect-registration",
+      "sha256": "23851ffceff6f47ba244835c69b57bebb7304997a1d4c00b7c9e7180ef5402a8",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/deploy-aws",
+      "sha256": "a7138933e5ebc3e5003e0968f218135363bc8f87330516aef225270a06da1dca",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/destroy-aws",
+      "sha256": "0de3510dcf4a532256a2559bae4a7133c9e35ad443da5f086130b0f1d90bf82c",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/iam-policies.ts",
+      "sha256": "34331a2c712e0b250d363469425c811c636ffb0331b39eb79f82587e6e427e62",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/install",
+      "sha256": "b0ef206f38acfcffaf0e60a7ddb0bbee917537c9a7186da8182177e3585e97fb",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/knowledge-delete",
+      "sha256": "d59c730468c92553aae11510d3674570f96fcfed5b16732015c47e02ecd1e7f9",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/knowledge-list",
+      "sha256": "818579221fb7dfa969439cf7e2de31a61d1c2264e17fe6c1a6933eb149f472e4",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/knowledge-put",
+      "sha256": "e8ade96638c868e85e44aabefe28a79ee82b415bddf9c1abfc07d7b928419603",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/lib/aws.ts",
+      "sha256": "012c9b3ba65e83b3157064351e05ff01efca51368e8cd76c2c7a0bceb84d3c80",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/config.ts",
+      "sha256": "82e77db4aba50ab74ea7b31d0dfd410cb7d0d9e7b79153ed06569e295c61ea2c",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/environment-lease.ts",
+      "sha256": "24665a98b60fd3635f502809fe4f7329770d1df90197a097a30f9ca3658a850c",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/group-management.ts",
+      "sha256": "548a1b664b861a707507ef37efeb5e241a457d5cd3a3ef48faf87bde91d76d65",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/leased-slack.ts",
+      "sha256": "e44f43f56f3be0a55956723910d249de2f4df666e640a0a75814a8ebec5ca798",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-anchor.ts",
+      "sha256": "2addcb3094cd05a5ed80372777e1378493db383e05034ae79da75bf935318f76",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-authorization.ts",
+      "sha256": "96247d0d89f1197c460752f76e61665ef11d5febe2be52adb2e73a0e4aded464",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-discovery.ts",
+      "sha256": "bbc44deec008cd094e08f64e9f8de04c82fe82c64d5e6ea5ca277b773fb7581b",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-evidence.ts",
+      "sha256": "b35a1f1bdbe60a2471626f2eb84ea3f5778aeb97f66207d9a60ce5c35e19e22e",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-execution.ts",
+      "sha256": "66db8f936d7478f4dd5a0de349920b8898cc702c705be74fba4b456e65f6acb6",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-inventory.ts",
+      "sha256": "e9ef284e3bd52621f2f3d4ab5aa51cc4eb5f4a0e817fd4ef745c8088b732b6fc",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-journal.ts",
+      "sha256": "929504cfe7771f3f8b5ea00f0dd53f2465a47a46d5e1b987e34b06c64219fac5",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-model.ts",
+      "sha256": "4fe3ff3ce43bd24e44f2e53c1499d32ad0990fc23af5274d8c7e098d8d5ffaa7",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-resources.ts",
+      "sha256": "6457032d6756143697d7238518775f3643ec608a5b63aac6092401f48b89d189",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-slack.ts",
+      "sha256": "01293842eda48010fff01301c63f6e7e75a01a85b1866006b79bcb1f7c4f291f",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-state.ts",
+      "sha256": "3e8453c4f9568ab5bba9aedaa62be7c73422036a42210c0f86486510fa3e5e5d",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge-terraform.ts",
+      "sha256": "4a69042f2e98cef8952adfb7a1af35ac27b2c1ded66cd20323fd0002bad4c843",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/purge.ts",
+      "sha256": "96004b9484cde56b275cafbc825efa9b0ef5a289a1ad760d44c749d44a4b661d",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/registration-setup.ts",
+      "sha256": "6e5e61d4bf93441a55fd8e33a867322780e32a0d3486434de51ea15750e8f7f3",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/removal.ts",
+      "sha256": "3dea8436d34c2128b822d8bc7b21d9edb33f209b9a99a063751b67aebeec1345",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/root-history-model.ts",
+      "sha256": "cd8ed67f4a9041ce63e23e0f69b25507f1c97dc764ae0d2d23eba7c599a82c23",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/root-history.ts",
+      "sha256": "1403875759447f14bac24b40c69730052397632e3754773ad042efdc4a0deb26",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/setup-diagnostics.ts",
+      "sha256": "65041225f6343a00f24518a2b9b66d8cba5670918bdab7ba00c4b9d6fd5f7ee3",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/slack-setup.ts",
+      "sha256": "1d15bd81aa1817f0f1ff7084df0ff9d202e43a46fe034bb351fc2ee6a636d9c0",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/terraform.ts",
+      "sha256": "e91fae88a2efb7d6d6ce6446ecdfcd74a8cde0d6fa20b8c36730f490eeb5575c",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/migrate-config",
+      "sha256": "fcc5240caef124ebba9829becfc9c052a498d74856e28bd11097b630715429c1",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/purge-env",
+      "sha256": "3ee0457e136a81503f74e584cefc9e265b504dd6ff16d9e34e7e38cba460db8c",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/recover-registration",
+      "sha256": "9c102a6cc3990c0adc50c068ab545cde2bac369c7db8614dbf7945bf0417c6ed",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/remove-slack",
+      "sha256": "46d42ebbf39bede64d850e5f88134454f901eb5513b6c2ab425f200bedf479b4",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/setup-slack",
+      "sha256": "de3598932d7d0b4e56a6a1a11022c2d939ecf15a493b347d8a7b9a8bfcf62671",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/show-config",
+      "sha256": "447311e42d2e312b17807abc0bd00dadc2e795d6d8680ea199e8a00e300ee61d",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/uninstall",
+      "sha256": "66e7fa67fadeaf8f5e4ac5eaadf753885be5d2c4519340c0894243bab5005d22",
+      "mode": "100755"
+    },
+    {
+      "path": "slack/manifest.json",
+      "sha256": "aad5dbc8e07d5cb558027b57296893f62e73c7c332fcb4d92cf135661c73f992",
+      "mode": "100644"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "e461bd0d2b49ca1c9e9a63567c06a099b02295f1a45492415a859b4ad89697f2",
+      "mode": "100644"
+    }
+  ]
+}

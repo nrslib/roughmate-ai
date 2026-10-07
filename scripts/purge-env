@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+if [[ ! -x node_modules/.bin/tsx ]]; then
+  printf '%s\n' '依存を先に npm ci で準備してください。' >&2
+  exit 1
+fi
+exec node --import tsx scripts/cli.ts purge-env "$@"

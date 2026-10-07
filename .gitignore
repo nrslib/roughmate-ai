@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.roughmate/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfbackend
+*.log
+*.pem
+.env
+.env.*
+.aws/
+.DS_Store
