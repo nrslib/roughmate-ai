@@ -115,7 +115,7 @@ async function publishKnowledgeResult(store: Storage, client: ReturnType<typeof 
   await publishHome(client, workspace, receipt.userId, message, config, [...wikiHomeBlocks(true),...knowledgeBlocks({...catalog,documents},incomplete), ...extra], channelAuthorizationBlock(await store.get<ChannelAuthorization>(`channel-user#${receipt.userId}`), config, receipt.userId));
   await store.releaseKnowledgeNotice(receipt.userId, owner);
 }
-async function processJob(raw: string): Promise<void> {
+export async function processConsultationJob(raw: string): Promise<void> {
   const job = object(JSON.parse(raw));
   if (job.kind === 'answer') throw new AppError('invalid_input');
   const payload = object(job.payload);
@@ -422,7 +422,7 @@ async function processJob(raw: string): Promise<void> {
 export async function handler(event: SQSEvent): Promise<SQSBatchResponse> {
   const failures: { itemIdentifier: string }[] = [];
   for (const record of event.Records) {
-    try { await processJob(record.body); }
+    try { await processConsultationJob(record.body); }
     catch (error) { process.stderr.write(JSON.stringify({ event: 'roughmate_worker_failed', code: diagnosticCode(error), messageId: record.messageId }) + '\n'); failures.push({ itemIdentifier: record.messageId }); }
   }
   return { batchItemFailures: failures };

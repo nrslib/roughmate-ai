@@ -1,6 +1,6 @@
+import { c, type DocumentOperation } from './document-store.js';
+import { runtime } from './runtime.js';
 import { randomBytes } from 'node:crypto';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { ErrorCode, type View, type WebClient } from '@slack/web-api';
 import { AppError, string, workerDrainSeconds } from './contracts.js';
 import { authorizeOwner } from './security.js';
@@ -14,13 +14,13 @@ interface DeletionConfirmation { pk:string; botId:string; actor:string; teamId:s
 const deletionKey=(id:string)=>`bot-delete#${id}`;
 export const archiveKey=(id:string)=>`bot-archive#${id}`;
 function rootCheck(table:string,owner:string,team:string) {
-  return {ConditionCheck:{TableName:table,Key:{pk:'workspace'},ConditionExpression:'ownerId = :owner AND teamId = :team',ExpressionAttributeValues:{':owner':owner,':team':team}}};
+  return {check:{namespace:table,key:{pk:'workspace'},condition: c.all(c.compare("ownerId","=",":owner"),c.compare("teamId","=",":team")),parameters:{':owner':owner,':team':team}}};
 }
 function registryPut(table:string,previous:Registry,next:Registry) {
-  return {Put:{TableName:table,Item:next,ConditionExpression:'#v = :v AND parentSecret = :parent AND (attribute_not_exists(homeNoticeUntil) OR homeNoticeUntil <= :now)',ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':previous.version,':parent':previous.parentSecret,':now':Math.floor(Date.now()/1000)}}};
+  return {put:{namespace:table,item:next,condition: c.all(c.compare("#v","=",":v"),c.compare("parentSecret","=",":parent"),c.group(c.any(c.absent("homeNoticeUntil"),c.compare("homeNoticeUntil","<=",":now")))),fields:{'#v':'version'},parameters:{':v':previous.version,':parent':previous.parentSecret,':now':Math.floor(Date.now()/1000)}}};
 }
 export class BotMaintenance {
-  private db=DynamoDBDocumentClient.from(new DynamoDBClient({maxAttempts:1,requestHandler:{requestTimeout:900,throwOnRequestTimeout:true,connectionTimeout:500}}));
+  private db=runtime().documents();
   constructor(private registrations:Registrations,private signal?:AbortSignal) {}
   private async target(registry:Registry,id:string,actor:string):Promise<{entry:Registration;config?:GroupConfig;store?:Storage}> {
     const [workspace,secrets]=await Promise.all([this.registrations.root.workspace(),this.registrations.root.readSecrets()]);
@@ -54,10 +54,10 @@ export class BotMaintenance {
     if(registry.version!==receipt.registryVersion || config?.version!==receipt.configVersion || entry.parentAppId!==receipt.rootAppId || entry.appId!==receipt.targetAppId || entry.deletion && entry.deletion.status!=='failed') throw new AppError('registration_conflict');
     const now=Math.floor(Date.now()/1000),deletion:BotDeletion={id,actor,status:'queued',requestedAt:now,notBefore:now+workerDrainSeconds,...(config ? {configVersion:config.version}:{})};
     const stopped={...entry,deletion};
-    const transaction:NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']>=[rootCheck(this.registrations.parentTable,actor,teamId),registryPut(this.registrations.parentTable,registry,{...registry,version:registry.version+1,entries:registry.entries.map(item=>item.id===entry.id ? stopped:item)}),
-      {ConditionCheck:{TableName:this.registrations.parentTable,Key:{pk:receipt.pk},ConditionExpression:'actor = :actor AND teamId = :team AND payloadAppId = :app AND expiresAt > :now',ExpressionAttributeValues:{':actor':actor,':team':teamId,':app':payloadAppId,':now':now}}}
+    const transaction:DocumentOperation[]=[rootCheck(this.registrations.parentTable,actor,teamId),registryPut(this.registrations.parentTable,registry,{...registry,version:registry.version+1,entries:registry.entries.map(item=>item.id===entry.id ? stopped:item)}),
+      {check:{namespace:this.registrations.parentTable,key:{pk:receipt.pk},condition: c.all(c.compare("actor","=",":actor"),c.compare("teamId","=",":team"),c.compare("payloadAppId","=",":app"),c.compare("expiresAt",">",":now")),parameters:{':actor':actor,':team':teamId,':app':payloadAppId,':now':now}}}
     ];
-    if(config) transaction.push({Update:{TableName:childResources(this.registrations.parentTable,this.registrations.parentSecret,entry.id).tableName,Key:{pk:'roughmate'},UpdateExpression:'SET lifecycle = :stop, stopId = :id, stoppedAt = :now',ConditionExpression:'#v = :v AND environmentId = :env AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(lifecycle) OR lifecycle = :stop)',ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':actor':actor,':stop':'stopping',':id':id,':now':now}}});
+    if(config) transaction.push({update:{namespace:childResources(this.registrations.parentTable,this.registrations.parentSecret,entry.id).tableName,key:{pk:'roughmate'},changes: [c.set("lifecycle",":stop"),c.set("stopId",":id"),c.set("stoppedAt",":now")],condition: c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("lifecycle"),c.compare("lifecycle","=",":stop")))),fields:{'#v':'version'},parameters:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':actor':actor,':stop':'stopping',':id':id,':now':now}}});
     await this.transaction(transaction);return stopped;
   }
   async checkRequest(botId:string,actor:string,teamId:string,appId:string):Promise<Registration> {
@@ -80,7 +80,7 @@ export class BotMaintenance {
     const [workspace,secrets]=await Promise.all([this.registrations.root.workspace(),this.registrations.root.readSecrets()]);
     if(!saved || saved.pk!==archiveKey(id) || saved.entry.id!==id || saved.parentSecret!==this.registrations.parentSecret || saved.rootOwner!==workspace.ownerId || saved.entry.actor!==workspace.ownerId || saved.entry.teamId!==workspace.teamId || saved.entry.parentAppId!==secrets.appId || !saved.entry.appId || saved.entry.appId===secrets.appId || !saved.entry.secretArn || !Number.isFinite(Date.parse(saved.deletedAt)) || Buffer.byteLength(JSON.stringify(saved))>8192) throw new AppError('registration_boundary');
     const resources=childResources(this.registrations.parentTable,this.registrations.parentSecret,id);
-    if(!saved.entry.secretArn.startsWith(resources.secretPrefix) || !/^[A-Za-z0-9]{6}$/.test(saved.entry.secretArn.slice(resources.secretPrefix.length))) throw new AppError('registration_boundary');
+    if(!runtime().children.validSecret(resources, saved.entry.secretArn)) throw new AppError('registration_boundary');
     return saved;
   }
   async browserBot(id:string):Promise<{entry:Registration;store:Storage;archived:boolean}> {
@@ -103,7 +103,7 @@ export class BotMaintenance {
     const now=Math.floor(Date.now()/1000);
     if(config?.publicationOwner && config.postingUntil!==undefined && config.postingUntil<=now && config.stoppedAt!==undefined && config.stoppedAt+workerDrainSeconds<=now && ['draft','settings','knowledge'].includes(config.publicationKind ?? '')) {
       // Drain has outlived the worker and lease. Final/unknown answer leases are never cleared here.
-      await this.transaction([rootCheck(this.registrations.parentTable,actor,teamId),{Update:{TableName:childResources(this.registrations.parentTable,this.registrations.parentSecret,botId).tableName,Key:{pk:'roughmate'},UpdateExpression:'SET postingUntil = :zero REMOVE publicationOwner, publicationKind',ConditionExpression:'#v = :v AND environmentId = :env AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND lifecycle = :stop AND stopId = :id AND publicationOwner = :owner AND publicationKind = :kind AND postingUntil = :until AND postingUntil <= :now',ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':actor':actor,':stop':'stopping',':id':entry.deletion.id,':owner':config.publicationOwner,':kind':config.publicationKind,':until':config.postingUntil,':now':now,':zero':0}}}]);delete config.publicationOwner;delete config.publicationKind;config.postingUntil=0;
+      await this.transaction([rootCheck(this.registrations.parentTable,actor,teamId),{update:{namespace:childResources(this.registrations.parentTable,this.registrations.parentSecret,botId).tableName,key:{pk:'roughmate'},changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")],condition: c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.compare("lifecycle","=",":stop"),c.compare("stopId","=",":id"),c.compare("publicationOwner","=",":owner"),c.compare("publicationKind","=",":kind"),c.compare("postingUntil","=",":until"),c.compare("postingUntil","<=",":now")),fields:{'#v':'version'},parameters:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':actor':actor,':stop':'stopping',':id':entry.deletion.id,':owner':config.publicationOwner,':kind':config.publicationKind,':until':config.postingUntil,':now':now,':zero':0}}}]);delete config.publicationOwner;delete config.publicationKind;config.postingUntil=0;
     }
     if(config?.publicationOwner || config?.postingUntil && config.postingUntil>Math.floor(Date.now()/1000)) {
       if(config.publicationKind==='answer' && entry.deletion.status==='queued' && entry.deletion.failureCode!=='answer_reconciliation_required') await this.update(registry,entry,{...entry.deletion,failureCode:'answer_reconciliation_required'});
@@ -158,12 +158,12 @@ export class BotMaintenance {
     registry=await this.registrations.read();entry=registry.entries.find(item=>item.id===botId)!;
     if(!entry?.deletion || config && entry.deletion.id!==config.stopId) throw new AppError('registration_conflict');
     const archived:BotArchive={pk:archiveKey(botId),entry,rootOwner:actor,parentSecret:this.registrations.parentSecret,deletedAt:new Date().toISOString(),...(registry.archiveHead ? {next:registry.archiveHead}:{})};
-    const transaction:NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']>=[rootCheck(this.registrations.parentTable,actor,teamId),registryPut(this.registrations.parentTable,registry,{...registry,version:registry.version+1,archiveHead:archived.pk,entries:registry.entries.filter(item=>item.id!==botId)}),{Put:{TableName:this.registrations.parentTable,Item:archived,ConditionExpression:'attribute_not_exists(pk)'}}];
-    if(config) transaction.push({Update:{TableName:childResources(this.registrations.parentTable,this.registrations.parentSecret,botId).tableName,Key:{pk:'roughmate'},UpdateExpression:'SET lifecycle = :archive',ConditionExpression:'#v = :v AND lifecycle = :stop AND stopId = :id AND contains(adminIds, :actor) AND attribute_not_exists(publicationOwner)',ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':config.version,':stop':'stopping',':id':entry.deletion.id,':actor':actor,':archive':'archived'}}});
+    const transaction:DocumentOperation[]=[rootCheck(this.registrations.parentTable,actor,teamId),registryPut(this.registrations.parentTable,registry,{...registry,version:registry.version+1,archiveHead:archived.pk,entries:registry.entries.filter(item=>item.id!==botId)}),{put:{namespace:this.registrations.parentTable,item:archived,condition: c.absent("pk")}}];
+    if(config) transaction.push({update:{namespace:childResources(this.registrations.parentTable,this.registrations.parentSecret,botId).tableName,key:{pk:'roughmate'},changes: [c.set("lifecycle",":archive")],condition: c.all(c.compare("#v","=",":v"),c.compare("lifecycle","=",":stop"),c.compare("stopId","=",":id"),c.contains("adminIds",":actor"),c.absent("publicationOwner")),fields:{'#v':'version'},parameters:{':v':config.version,':stop':'stopping',':id':entry.deletion.id,':actor':actor,':archive':'archived'}}});
     await this.transaction(transaction);
   }
-  private async transaction(items:NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']>):Promise<void> {
-    try {await this.db.send(new TransactWriteCommand({TransactItems:items}),{abortSignal:this.signal});}
+  private async transaction(items:DocumentOperation[]):Promise<void> {
+    try {await this.db.transaction({operations:items}, {abortSignal:this.signal});}
     catch(error) {if(error instanceof Error && error.name==='TransactionCanceledException') throw new AppError('registration_conflict');throw error;}
   }
 }

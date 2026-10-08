@@ -15,7 +15,7 @@ import { diagnosticCode } from './diagnostics.js';
 import type { WikiAdoption } from './wiki-adoption.js';
 import type { AnswerRecord } from './wiki-model.js';
 
-async function processJob(raw:string):Promise<void> {
+export async function processWikiJob(raw:string):Promise<void> {
   const job=object(JSON.parse(raw));
   if(!['wiki','wiki_ui','wiki_command','wiki_adoption','wiki_archive_retention'].includes(string(job.kind))) throw new AppError('invalid_input');
   const payload=object(job.payload),signal=AbortSignal.timeout(105000);
@@ -119,7 +119,7 @@ async function processJob(raw:string):Promise<void> {
 export async function handler(event:SQSEvent):Promise<SQSBatchResponse> {
   const failures:{itemIdentifier:string}[]=[];
   for(const record of event.Records) {
-    try {await processJob(record.body);}
+    try {await processWikiJob(record.body);}
     catch(error) {process.stderr.write(JSON.stringify({event:'roughmate_wiki_worker_failed',code:diagnosticCode(error),messageId:record.messageId})+'\n');failures.push({itemIdentifier:record.messageId});}
   }
   return {batchItemFailures:failures};

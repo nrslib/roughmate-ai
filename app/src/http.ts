@@ -1,3 +1,4 @@
+import { runtime } from './runtime.js';
 import { proposalActions, acceptProposalSubmission } from './wiki-proposal-slack.js';
 import { wikiWeb } from './wiki-web.js';
 import { BotMaintenance } from './bot-maintenance.js';
@@ -7,8 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { beginChannelAuthorization, completeChannelAuthorization } from './channel-authorization.js';
 import { RequestDeadline, SLACK_REQUEST_BUDGET_MS } from './deadline.js';
 import { diagnosticCode } from './diagnostics.js';
-import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import type { HttpRequest, HttpResponse } from './http-contract.js';
 import { AppError, env, object, string, requireInstalledSecrets, type QueueJob, type Consultation } from './contracts.js';
 import { verifySignature, stateKey, authorizeOwner, authorizeWorkspace } from './security.js';
 import { Storage, requireSettingsExpiry } from './storage.js';
@@ -20,11 +20,11 @@ import { beginInstall, installChild, OAUTH_CALLBACK_BUDGET_MS } from './provisio
 import { knowledgeView, requestKnowledge, submittedDocument, knowledgeContent, type KnowledgeReceipt } from './knowledge-ui.js';
 import { wikiPreparingView, submittedWikiCommand, acceptWikiCommand } from './wiki-ui.js';
 import type { WikiCommand } from './wiki-worker.js';
-const queue = new SQSClient({ maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } });
+const queue = runtime().queue();
 async function enqueue(job: QueueJob, abortSignal?: AbortSignal): Promise<void> {
-  await queue.send(new SendMessageCommand({ QueueUrl: env(['wiki','wiki_ui','wiki_command','wiki_adoption'].includes(job.kind) ? 'WIKI_QUEUE_URL':'QUEUE_URL'), MessageBody: JSON.stringify(job) }), { abortSignal });
+  await queue.enqueue({ destination: env(['wiki','wiki_ui','wiki_command','wiki_adoption'].includes(job.kind) ? 'WIKI_QUEUE_URL':'QUEUE_URL'), body: JSON.stringify(job) }, { abortSignal });
 }
-async function oauthCallback(event: APIGatewayProxyEventV2, deadline: RequestDeadline): Promise<APIGatewayProxyStructuredResultV2> {
+async function oauthCallback(event: HttpRequest, deadline: RequestDeadline): Promise<HttpResponse> {
   const store = new Storage(env('TABLE_NAME'), env('SECRET_ARN'), deadline.signal);
   const secrets = await deadline.step(() => store.readSecrets());
   const rawSeed = await deadline.step(() => store.get('roughmate#setup'));
@@ -94,8 +94,8 @@ async function oauthCallback(event: APIGatewayProxyEventV2, deadline: RequestDea
   }
   const initialGroup = seed && !await deadline.step(() => store.get('roughmate')) ? validateGroup({ pk: 'roughmate', environmentId: env('SECRET_ARN'), appId: secrets.appId, teamId: installed.teamId, version: 1, name: seed.name, description: seed.description, adminIds: [installed.ownerId], notifyUserIds: [], intakeChannelIds: [] }) : undefined;
   const installedSecrets = { ...secrets, botUserId, botToken: token, botScopes: grantedScopes, rootOAuth: { requestId: attempt, ...installed } };
-  await deadline.step(() => store.install(installed));
-  await deadline.step(() => store.saveSecrets(installedSecrets));
+  await deadline.step(() => store.stageRootOAuthSecrets(secrets, installedSecrets, attempt));
+  await deadline.step(() => store.resumeRootOAuthSecrets(secrets, attempt));
   if (initialGroup) await deadline.step(() => store.initializeGroup(initialGroup));
   await deadline.step(() => store.finishRootOAuth(secrets.appId, attempt));
   await deadline.step(() => enqueue({ kind: 'home', payload: { environmentId: env('SECRET_ARN'), appId: secrets.appId, teamId: installed.teamId, userId: installed.ownerId } }, deadline.signal));
@@ -115,7 +115,7 @@ function modalNavigationTarget(payload: Record<string, unknown>, appId: string, 
   if (string(container.view_id) !== viewId || view.app_id !== appId || view.team_id !== undefined && view.team_id !== teamId) throw new AppError('forbidden');
   return view.type === 'modal' ? { view_id: viewId, hash: string(view.hash) } : undefined;
 }
-function isDeletionConfirmation(event:APIGatewayProxyEventV2):boolean {
+function isDeletionConfirmation(event:HttpRequest):boolean {
   if(event.requestContext.http.method!=='POST' || !/^(?:\/bots\/[a-f0-9]{32})?\/slack\/interactive$/.test(event.rawPath)) return false;
   try {
     const body=event.isBase64Encoded ? Buffer.from(string(event.body),'base64').toString('utf8'):string(event.body);
@@ -123,14 +123,14 @@ function isDeletionConfirmation(event:APIGatewayProxyEventV2):boolean {
     return payload.type==='block_actions' && Array.isArray(payload.actions) && object(payload.actions[0]).action_id==='delete_bot';
   } catch {return false;}
 }
-function registrationResponse(text: string): APIGatewayProxyStructuredResultV2 {
+function registrationResponse(text: string): HttpResponse {
   return { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response_action: 'update', view: { type: 'modal', title: { type: 'plain_text', text: 'Bot登録の結果' }, close: { type: 'plain_text', text: '閉じる' }, blocks: [{ type: 'section', text: { type: 'plain_text', text } }] } }) };
 }
-function wikiAdoptionResponse(accepted:boolean):APIGatewayProxyStructuredResultV2 {
+function wikiAdoptionResponse(accepted:boolean):HttpResponse {
   const text=accepted ? '採用・見送りの指示を受け付けました。検査・更新待ちです。権限検査とWiki反映はまだ完了していません。本人認証済みHome / Wikiで処理結果を確認してください。':'指示の受付・保存・配送結果を確認できません。再採用せず、本人認証済みHome / Wikiで状態を確認してください。受け付けた同じ指示はHomeの「今すぐ同期」で再開できます。受付記録がない場合は最新の提案を開き直してください。';
   return {statusCode:200,headers:{'content-type':'application/json'},body:JSON.stringify({response_action:'update',view:{type:'modal',title:{type:'plain_text',text:'Wiki更新指示の受付'},close:{type:'plain_text',text:'閉じる'},blocks:[{type:'section',text:{type:'plain_text',text}}]}})};
 }
-function registrationFailure(error: unknown): APIGatewayProxyStructuredResultV2 {
+function registrationFailure(error: unknown): HttpResponse {
   const messages: Record<string, [string, string]> = {
     invalid_input: ['name', '入力項目を確認してください。'],
     invalid_name: ['name', 'アプリ名は35文字以内で入力してください。'],
@@ -148,7 +148,7 @@ function registrationFailure(error: unknown): APIGatewayProxyStructuredResultV2 
   if (field) return { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response_action: 'errors', errors: { [field[0]]: field[1] } }) };
   return registrationResponse('登録の保存・送信結果を確認できません。未保存と判断して別のBotを作らず、登録窓口のHomeを開き直し、登録一覧と「処理・保存結果を再確認」を確認してください。受理済みの要求は自動で再開します。一覧にない場合は環境管理者に確認してください。');
 }
-async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDeadline, response: RegistrationResponse): Promise<APIGatewayProxyStructuredResultV2> {
+async function receiveSlack(event: HttpRequest, deadline: RequestDeadline, response: RegistrationResponse): Promise<HttpResponse> {
   const childRoute = /^\/bots\/([a-f0-9]{32})(\/slack\/(?:events|interactive))$/.exec(event.rawPath);
   if (event.requestContext.http.method !== 'POST' || !childRoute && !['/slack/events','/slack/interactive'].includes(event.rawPath)) return { statusCode: 404, body: '' };
   const registrations = new Registrations(env('TABLE_NAME'), env('SECRET_ARN'), deadline.signal);
@@ -230,7 +230,7 @@ async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDead
       }
       else {
         const entry=await deadline.step(()=>maintenance.checkRequest(botId,user,team,secrets.appId));
-        await deadline.step(()=>queue.send(new SendMessageCommand({QueueUrl:env('PROVISION_QUEUE_URL'),MessageBody:JSON.stringify({kind:'delete_bot',id:entry.id,actor:user,teamId:team,appId:entry.parentAppId})}),{abortSignal:deadline.signal}));
+        await deadline.step(()=>queue.enqueue({destination:env('PROVISION_QUEUE_URL'),body:JSON.stringify({kind:'delete_bot',id:entry.id,actor:user,teamId:team,appId:entry.parentAppId})}, {abortSignal:deadline.signal}));
       }
     } else if (['wiki_delete','wiki_retry','wiki_do_sync'].includes(actionId)) {
       if (!config) throw new AppError('group_not_configured');
@@ -272,7 +272,7 @@ async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDead
         const registry = await deadline.step(() => registrations.read());
         const entry = registry.entries.find(item => item.id === id);
         if (!entry || entry.actor !== user || entry.teamId !== team || entry.parentAppId !== secrets.appId) throw new AppError('forbidden');
-        await deadline.step(() => queue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id, actor: user, teamId: team, appId: secrets.appId }) }), { abortSignal: deadline.signal }));
+        await deadline.step(() => queue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id, actor: user, teamId: team, appId: secrets.appId }) }, { abortSignal: deadline.signal }));
       } else {
         const url = await deadline.step(() => beginInstall(registrations, id, user, deadline));
         await navigateView({ type: 'modal', title: { type: 'plain_text', text: 'Slackへの追加' }, close: { type: 'plain_text', text: '閉じる' }, blocks: [{ type: 'section', text: { type: 'plain_text', text: '次のボタンを開き、Slackで許可してください。このリンクは15分・一回限りです。追加後に子BotのHomeから資料と受付先を設定します。' } }, { type: 'actions', elements: [{ type: 'button', action_id: 'oauth_link', text: { type: 'plain_text', text: 'Slackに追加・許可' }, url }] }] });
@@ -337,7 +337,7 @@ async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDead
     if(view.callback_id==='delete_bot') {
       response.deletionSubmitted=true;
       const entry=await deadline.step(()=>new BotMaintenance(registrations,deadline.signal).accept(string(view.private_metadata),user,team,secrets.appId));
-      await deadline.step(()=>queue.send(new SendMessageCommand({QueueUrl:env('PROVISION_QUEUE_URL'),MessageBody:JSON.stringify({kind:'delete_bot',id:entry.id,actor:user,teamId:team,appId:entry.parentAppId}),DelaySeconds:150}),{abortSignal:deadline.signal}));
+      await deadline.step(()=>queue.enqueue({destination:env('PROVISION_QUEUE_URL'),body:JSON.stringify({kind:'delete_bot',id:entry.id,actor:user,teamId:team,appId:entry.parentAppId}),delaySeconds:150}, {abortSignal:deadline.signal}));
       return registrationResponse('Botを停止し、専用Slack Appの削除を受け付けました。登録窓口のHomeで処理状況を確認してください。Wikiと確定回答はアーカイブに残ります。');
     } else if (view.callback_id === 'wiki_proposal_submit') {
       if(!config) throw new AppError('group_not_configured');
@@ -357,7 +357,7 @@ async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDead
       if (connection?.phase !== 'ready') throw new AppError('configuration_not_connected');
       const input = { name: object(object(values.name).text).value, botName: object(object(values.botName).text).value, description: object(object(values.description).text).value ?? '' };
       const entry = await deadline.step(() => registrations.register(workspace, secrets.appId, user, string(view.private_metadata), input, deadline));
-      await deadline.step(() => queue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id: entry.id, actor: user, teamId: team, appId: secrets.appId }) }), { abortSignal: deadline.signal }));
+      await deadline.step(() => queue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id: entry.id, actor: user, teamId: team, appId: secrets.appId }) }, { abortSignal: deadline.signal }));
       return registrationResponse('作成依頼を保存し、処理を受け付けました。登録窓口のHomeを開き直してください。準備が終わったら、登録一覧の「Slackに追加」から本人として許可してください。');
     } else if (view.callback_id === 'knowledge') {
       if (!config) throw new AppError('group_not_configured');
@@ -410,7 +410,7 @@ async function receiveSlack(event: APIGatewayProxyEventV2, deadline: RequestDead
   }
   return { statusCode: 200, body: '' };
 }
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
+export async function handler(event: HttpRequest): Promise<HttpResponse> {
   if(event.rawPath.startsWith('/wiki/')) return wikiWeb(event);
   const authorizationRoute = /^(?:\/bots\/([a-f0-9]{32}))?\/channel-authorization\/callback$/.exec(event.rawPath);
   const registration: RegistrationResponse = {};
@@ -468,7 +468,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     return { statusCode: error instanceof AppError ? (['request_deadline','settings_conflict','registration_conflict'].includes(error.code) ? 503 : ['forbidden','invalid_signature','invalid_state'].includes(error.code) ? 403 : 400) : 503, body: '処理できませんでした。再実行してください。' };
   }
 }
-function channelAuthorizationFailure(error: unknown): APIGatewayProxyStructuredResultV2 {
+function channelAuthorizationFailure(error: unknown): HttpResponse {
   const code = error instanceof AppError ? error.code : undefined;
   let reason = 'Slackとの認可交換・本人確認、保存または通知の結果を確認できません。BotのHomeで保存状態を確認してください。';
   if (code === 'channel_authorization_denied') reason = '本人による非公開招待の認可がSlackで拒否されました。';
@@ -487,7 +487,7 @@ function channelAuthorizationFailure(error: unknown): APIGatewayProxyStructuredR
   return { statusCode, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }, body: `<!doctype html><html lang="ja"><meta charset="utf-8"><title>本人認可を完了できませんでした</title><p>${reason}</p><p>${recovery}</p></html>` };
 }
 
-function rootOAuthFailure(error: unknown): APIGatewayProxyStructuredResultV2 {
+function rootOAuthFailure(error: unknown): HttpResponse {
   const code = error instanceof AppError ? error.code : undefined;
   const reasons: Record<string,string> = {
     root_oauth_denied: '登録窓口Botの認可がSlackで拒否されました。',

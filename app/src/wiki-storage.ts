@@ -1,10 +1,10 @@
+import { c, type DocumentStore, type DocumentOperation } from './document-store.js';
 import type { ConsultationCondition } from './consultation-store.js';
-import { dynamoConsultationCondition } from './aws-consultation-condition.js';
+import { documentConsultationCondition } from './consultation-condition.js';
 import { wikiContentHash } from './wiki-content.js';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { confirmedAnswer, validateAnswerStorage } from './answer-evidence.js';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { AppError, string, workerDrainSeconds, type Consultation } from './contracts.js';
 import { requireIdentity, type GroupConfig, type GroupIdentity, type KnowledgeCatalog } from './groups.js';
 import { emptyWiki, hashText, requireProposalDelivery, validateWiki, wikiLimits, type WikiRoot, type AnswerRecord, type SourceRecord, type WorkState, type WikiCheckpoint, wikiContentVersion, sourceConsultable, manualWithheld, answerSummary, answerRetained } from './wiki-model.js';
@@ -13,18 +13,18 @@ import { promptCitation } from './wiki-provenance.js';
 import { answerQuestion } from './answer-question.js';
 
 interface PendingNode extends GroupIdentity { pk:string; answerId:string; active:boolean; prev?:string; next?:string; }
-type TransactionItems=NonNullable<TransactWriteCommandInput['TransactItems']>;
+type TransactionItems=DocumentOperation[];
 const originalAnswerFields=['pk','id','requestId','environmentId','appId','teamId','version','hash','question','questionState','questionCapture','requesterId','draft','answer','actorId','answerTs','sentAt','sourceChannel','sourceTs','mentionTs','reviewChannel','reviewTs','channelIds','reviewChannelIds','dependencies','references','next'] as const;
 const immutableAnswerFields=[...originalAnswerFields,'recoveredQuestion','questionRecoveryHash'] as const;
 const immutableAdoptionFields=['command','commandHash','acceptedAt','commandExpiresAt','environmentId','appId','teamId'] as const;
 function itemSnapshot(item:Record<string,unknown>,fields:readonly string[]) {
   const names:Record<string,string>={},values:Record<string,unknown>={};
-  const expression=fields.map((field,index)=>{
+  const condition=c.all(...fields.map((field,index)=>{
     const name=`#f${index}`,value=`:f${index}`;names[name]=field;
-    if(item[field]===undefined) return `attribute_not_exists(${name})`;
-    values[value]=item[field];return `${name} = ${value}`;
-  }).join(' AND ');
-  return {expression,names,values};
+    if(item[field]===undefined) return c.absent(name);
+    values[value]=item[field];return c.compare(name, '=', value);
+  }));
+  return {condition,names,values};
 }
 
 function pendingWork(work:Pick<WorkState,'status'|'adoptionKey'>):boolean {
@@ -32,10 +32,10 @@ function pendingWork(work:Pick<WorkState,'status'|'adoptionKey'>):boolean {
 }
 export class WikiStorage {
   private erasures:WikiErasureIndex;
-  constructor(private db:DynamoDBDocumentClient,private table:string,private signal?:AbortSignal) {this.erasures=new WikiErasureIndex(db,table,signal);}
+  constructor(private db:DocumentStore,private table:string,private signal?:AbortSignal) {this.erasures=new WikiErasureIndex(db,table,signal);}
   async get<T>(pk:string):Promise<T|undefined> {
-    const result=await this.db.send(new GetCommand({TableName:this.table,Key:{pk},ConsistentRead:true}),{abortSignal:this.signal});
-    return result.Item as T|undefined;
+    const result=await this.db.get({namespace:this.table,key:{pk},consistent:true}, {abortSignal:this.signal});
+    return result.item as T|undefined;
   }
   async root(identity:GroupIdentity):Promise<WikiRoot> {
     const raw=await this.get('wiki');
@@ -47,8 +47,8 @@ export class WikiStorage {
     while(next.answers.length && Buffer.byteLength(JSON.stringify(next))>wikiLimits.rootBytes) next.answers=next.answers.slice(0,-1);
     validateWiki(next,previous);
     if(next.version!==previous.version+1) throw new AppError('invalid_wiki');
-    return {TableName:this.table,Item:next,ConditionExpression:previous.version===0 ? 'attribute_not_exists(pk)' : '#v = :v AND environmentId = :env AND appId = :app AND teamId = :team',
-      ...(previous.version ? {ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':previous.version,':env':previous.environmentId,':app':previous.appId,':team':previous.teamId}} : {})};
+    return {namespace:this.table,item:next,condition: (previous.version===0 ? c.absent("pk") : c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"))),
+      ...(previous.version ? {fields:{'#v':'version'},parameters:{':v':previous.version,':env':previous.environmentId,':app':previous.appId,':team':previous.teamId}} : {})};
   }
   async manualKnowledgeChange(config:GroupConfig,previous:KnowledgeCatalog,next:KnowledgeCatalog):Promise<{write:TransactionItems[number];tasks:string[]}> {
     requireIdentity(previous,config);requireIdentity(next,config);
@@ -60,7 +60,7 @@ export class WikiStorage {
       tasks.push(`manual:${document.id}:${document.version}`);
       return {id:document.id,version:document.version,hash,work:{status:'pending' as const,attempts:0}};
     });
-    return {write:{Put:this.rootPut(root,{...root,version:root.version+1,manualJobs})},tasks};
+    return {write:{put:this.rootPut(root,{...root,version:root.version+1,manualJobs})},tasks};
   }
   requirePendingIndex(root:WikiRoot):void {
     if(root.pendingIndexVersion!==1 || root.pendingSequence!==undefined || root.legacyHistoryHead!==undefined) throw new AppError('wiki_task_index_unsupported');
@@ -75,7 +75,7 @@ export class WikiStorage {
   }
   private pendingPut(node:PendingNode,previous?:PendingNode):TransactionItems[number] {
     const fields=['active','prev','next','answerId'] as const;
-    return {Put:{TableName:this.table,Item:node,ConditionExpression:previous ? fields.map((field,index)=>previous[field]===undefined ? `attribute_not_exists(#f${index})` : `#f${index} = :f${index}`).join(' AND ') : 'attribute_not_exists(pk)',...(previous ? {ExpressionAttributeNames:Object.fromEntries(fields.map((field,index)=>[`#f${index}`,field])),ExpressionAttributeValues:Object.fromEntries(fields.flatMap((field,index)=>previous[field]===undefined ? [] : [[`:f${index}`,previous[field]]]))}: {})}};
+    return {put:{namespace:this.table,item:node,condition:previous ? c.all(...fields.map((field,index)=>previous[field]===undefined ? c.absent(`#f${index}`) : c.compare(`#f${index}`, '=', `:f${index}`))) : c.absent('pk'),...(previous ? {fields:Object.fromEntries(fields.map((field,index)=>[`#f${index}`,field])),parameters:Object.fromEntries(fields.flatMap((field,index)=>previous[field]===undefined ? [] : [[`:f${index}`,previous[field]]]))}: {})}};
   }
   private async indexChange(root:WikiRoot,next:WikiRoot,answer:AnswerRecord):Promise<TransactionItems> {
     if(!answer.pendingKey) return [];
@@ -141,17 +141,17 @@ export class WikiStorage {
       const largest={...answer,work:{...answer.work,owner:'0'.repeat(36),until:9999999999999}};
       if(Buffer.byteLength(JSON.stringify(largest))+wikiLimits.answerReserveBytes>wikiLimits.answerBytes) throw new AppError('invalid_wiki_answer');
     }
-    const nodes:NonNullable<TransactWriteCommandInput['TransactItems']>=writes.map(({item,work,checkpoint})=>{
+    const nodes:DocumentOperation[]=writes.map(({item,work,checkpoint})=>{
       if(checkpoint) {
         requireIdentity(checkpoint,config);
         const completed='status' in item && item.status==='completed';
         const metadata={pk:checkpoint.pk,environmentId:checkpoint.environmentId,appId:checkpoint.appId,teamId:checkpoint.teamId,status:'completed',...(checkpoint.previousProposalKey ? {previousProposalKey:checkpoint.previousProposalKey}:{})};
         if(checkpoint.pk!==item.pk || !/^wiki-proposal#[a-zA-Z0-9_-]{1,128}$/.test(checkpoint.pk) || (completed ? !isDeepStrictEqual(item,metadata) || Buffer.byteLength(JSON.stringify(item))>1024:!isDeepStrictEqual(item,checkpoint))) throw new AppError('invalid_wiki');
         const snapshot=itemSnapshot(checkpoint as unknown as Record<string,unknown>,['pages','pagesHash','inputId','approval','targets','comparisons','previousProposalKey','environmentId','appId','teamId']);
-        return {Put:{TableName:this.table,Item:item,ConditionExpression:snapshot.expression,ExpressionAttributeNames:snapshot.names,ExpressionAttributeValues:snapshot.values}};
+        return {put:{namespace:this.table,item:item,condition: snapshot.condition,fields:snapshot.names,parameters:snapshot.values}};
       }
       const snapshot=snapshots.get(String(item.pk));
-      return {Put:{TableName:this.table,Item:item,ConditionExpression:work ? '#work = :work'+(snapshot ? ` AND ${snapshot.expression}`:'') : 'attribute_not_exists(pk)',...(work ? {ExpressionAttributeNames:{'#work':'work',...snapshot?.names},ExpressionAttributeValues:{':work':work,...snapshot?.values}} : {})}};
+      return {put:{namespace:this.table,item:item,condition: (work ? c.all(c.compare("#work","=",":work"),(snapshot ? snapshot.condition : undefined)) : c.absent("pk")),...(work ? {fields:{'#work':'work',...snapshot?.names},parameters:{':work':work,...snapshot?.values}} : {})}};
     });
     const answers=writes.map(write=>write.item).filter(item=>String(item.pk).startsWith('wiki-answer#')) as AnswerRecord[];
     if(answers.length>1) throw new AppError('invalid_wiki');
@@ -161,13 +161,13 @@ export class WikiStorage {
     if(protection?.workOnly && previous.version>0 && next.contentVersion!==wikiContentVersion(previous)) throw new AppError('invalid_wiki');
     try {
       const transaction:TransactionItems=[
-        {ConditionCheck:{TableName:this.table,Key:{pk:'roughmate'},ConditionExpression:'#v = :v AND environmentId = :env AND appId = :app AND teamId = :team AND '+(protection?.workOnly ? 'attribute_exists(pk)' : '(attribute_not_exists(postingUntil) OR postingUntil <= :now)')+' AND attribute_not_exists(lifecycle)'+(protection?.publicationIdle ? ' AND attribute_not_exists(publicationOwner)':''),ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,...(!protection?.workOnly ? {':now':Math.floor(Date.now()/1000)}:{})}}},
-        {Put:rootPut},...nodes,...index,
-        ...(protection ? [{ConditionCheck:{TableName:this.table,Key:{pk:'knowledge'},ConditionExpression:'#v = :v',ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':protection.catalogVersion}}}] : [])
+        {check:{namespace:this.table,key:{pk:'roughmate'},condition: c.all(c.all(c.all(c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")),(protection?.workOnly ? c.exists("pk") : c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now"))))),c.absent("lifecycle")),(protection?.publicationIdle ? c.absent("publicationOwner") : undefined)),fields:{'#v':'version'},parameters:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,...(!protection?.workOnly ? {':now':Math.floor(Date.now()/1000)}:{})}}},
+        {put:rootPut},...nodes,...index,
+        ...(protection ? [{check:{namespace:this.table,key:{pk:'knowledge'},condition: c.compare("#v","=",":v"),fields:{'#v':'version'},parameters:{':v':protection.catalogVersion}}}] : [])
       ];
       transactionSize(transaction);
       if(protection?.saveBefore!==undefined && Date.now()>=protection.saveBefore) throw new AppError('settings_request_expired');
-      await this.db.send(new TransactWriteCommand({TransactItems:transaction}),{abortSignal:this.signal});
+      await this.db.transaction({operations:transaction}, {abortSignal:this.signal});
     } catch(error) { if(error instanceof Error && error.name==='TransactionCanceledException') throw new AppError('wiki_conflict'); throw error; }
   }
   async preflightSent(item:Consultation):Promise<void> {
@@ -180,7 +180,7 @@ export class WikiStorage {
     }
   }
   async confirmSent(item:Consultation,answerTs:string,condition?:ConsultationCondition):Promise<boolean> {
-    const extra=dynamoConsultationCondition(condition);
+    const extra=documentConsultationCondition(condition);
     const identity={environmentId:string(item.environmentId),appId:string(item.appId),teamId:item.teamId};
     if(item.status==='sent') {
       if(item.answerTs!==answerTs) throw new AppError('answer_state_conflict');
@@ -208,12 +208,12 @@ export class WikiStorage {
       const snapshot=itemSnapshot(item as unknown as Record<string,unknown>,['answer','actorId','question','questionCapture','draft','knowledgeReferences','sourceChannel','sourceTs','mentionTs','reviewChannel','reviewTs','wikiErasedAt','configVersion','postingUntil']);
       const release=await this.sentPublicationRelease(item,identity);
       try {
-        await this.db.send(new TransactWriteCommand({TransactItems:[
-          {Update:{TableName:this.table,Key:{pk:item.pk},UpdateExpression:'SET #s = :sent, answerTs = :ts, wikiAnswerId = :id'+(ownExpired ? ', wikiErasedAt = :erased REMOVE question, questionCapture, draft, answer, knowledgeReferences':dependencyExpired ? ', knowledgeReferences = :references, wikiErasedAt = :erased':''),ConditionExpression:'#s = :from AND '+(item.postingOwner===undefined ? 'attribute_not_exists(postingOwner)':'postingOwner = :owner')+' AND environmentId = :env AND appId = :app AND teamId = :team AND '+snapshot.expression+(extra ? ` AND (${extra.expression})` : ''),ExpressionAttributeNames:{'#s':'status',...snapshot.names},ExpressionAttributeValues:{':sent':'sent',':from':item.status,':ts':answerTs,...(item.postingOwner===undefined ? {}:{':owner':string(item.postingOwner)}),':id':pk,...(ownExpired || dependencyExpired ? {':erased':Date.now()}:{}),...(dependencyExpired && !ownExpired ? {':references':record.references}:{}),':env':identity.environmentId,':app':identity.appId,':team':identity.teamId,...snapshot.values,...extra?.values}}},
+        await this.db.transaction({operations:[
+          {update:{namespace:this.table,key:{pk:item.pk},changes: [...[c.set("#s",":sent"),c.set("answerTs",":ts"),c.set("wikiAnswerId",":id")],...(ownExpired ? [c.set("wikiErasedAt",":erased"),c.remove("question"),c.remove("questionCapture"),c.remove("draft"),c.remove("answer"),c.remove("knowledgeReferences")] : (dependencyExpired ? [c.set("knowledgeReferences",":references"),c.set("wikiErasedAt",":erased")] : []))],condition: c.all(c.all(c.all(c.all(c.compare("#s","=",":from"),(item.postingOwner===undefined ? c.absent("postingOwner") : c.compare("postingOwner","=",":owner"))),c.all(c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"))),snapshot.condition),(extra ? extra.condition : undefined)),fields:{'#s':'status',...snapshot.names},parameters:{':sent':'sent',':from':item.status,':ts':answerTs,...(item.postingOwner===undefined ? {}:{':owner':string(item.postingOwner)}),':id':pk,...(ownExpired || dependencyExpired ? {':erased':Date.now()}:{}),...(dependencyExpired && !ownExpired ? {':references':record.references}:{}),':env':identity.environmentId,':app':identity.appId,':team':identity.teamId,...snapshot.values,...extra?.values}}},
           ...release,...index,
-          {Put:{TableName:this.table,Item:record,ConditionExpression:'attribute_not_exists(pk)'}},
-          {Put:this.rootPut(root,next)}
-        ]}),{abortSignal:this.signal});
+          {put:{namespace:this.table,item:record,condition: c.absent("pk")}},
+          {put:this.rootPut(root,next)}
+        ]}, {abortSignal:this.signal});
         return true;
       } catch(error) {
         const current=await this.get<Consultation>(item.pk);
@@ -230,7 +230,7 @@ export class WikiStorage {
     if(!item.postingOwner || !config || config.publicationOwner!==item.postingOwner || config.environmentId!==identity.environmentId || config.appId!==identity.appId || config.teamId!==identity.teamId || config.version!==item.configVersion || !Number.isSafeInteger(config.postingUntil) || !config.postingUntil || config.postingUntil<0 || item.postingUntil!==0 && item.postingUntil!==config.postingUntil) return [];
     // 通信不明では相談側だけ期限が0になる。同じ所有者のleaseをCASで解除し、後続投稿には触れない。
     const snapshot=itemSnapshot(config as unknown as Record<string,unknown>,['publicationOwner','postingUntil','version','environmentId','appId','teamId']);
-    return [{Update:{TableName:this.table,Key:{pk:'roughmate'},UpdateExpression:'SET postingUntil = :zero REMOVE publicationOwner, publicationKind',ConditionExpression:snapshot.expression,ExpressionAttributeNames:snapshot.names,ExpressionAttributeValues:{...snapshot.values,':zero':0}}}];
+    return [{update:{namespace:this.table,key:{pk:'roughmate'},changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")],condition: snapshot.condition,fields:snapshot.names,parameters:{...snapshot.values,':zero':0}}}];
   }
   async finishStoppedUncertain(item:Consultation,config:GroupConfig,check:{startedAt:number;completedAt:number}):Promise<boolean> {
     const {startedAt,completedAt}=check,now=Math.floor(Date.now()/1000);
@@ -240,10 +240,10 @@ export class WikiStorage {
     const lock=itemSnapshot(config as unknown as Record<string,unknown>,['lifecycle','stopId','stoppedAt','version','environmentId','appId','teamId','publicationOwner','publicationKind','postingUntil']);
     // 見つからなかった事実だけを記録する。送信成功・未送信確定・学習登録へは変換しない。
     try {
-      await this.db.send(new TransactWriteCommand({TransactItems:[
-        {Update:{TableName:this.table,Key:{pk:item.pk},UpdateExpression:'SET stoppedAnswerReconciliation = :receipt',ConditionExpression:request.expression,ExpressionAttributeNames:request.names,ExpressionAttributeValues:{...request.values,':receipt':receipt}}},
-        {Update:{TableName:this.table,Key:{pk:'roughmate'},UpdateExpression:'SET postingUntil = :zero REMOVE publicationOwner, publicationKind',ConditionExpression:lock.expression,ExpressionAttributeNames:lock.names,ExpressionAttributeValues:{...lock.values,':zero':0}}}
-      ]}),{abortSignal:this.signal});
+      await this.db.transaction({operations:[
+        {update:{namespace:this.table,key:{pk:item.pk},changes: [c.set("stoppedAnswerReconciliation",":receipt")],condition: request.condition,fields:request.names,parameters:{...request.values,':receipt':receipt}}},
+        {update:{namespace:this.table,key:{pk:'roughmate'},changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")],condition: lock.condition,fields:lock.names,parameters:{...lock.values,':zero':0}}}
+      ]}, {abortSignal:this.signal});
       return true;
     } catch(error) {if(error instanceof Error && error.name==='TransactionCanceledException') return false;throw error;}
   }
@@ -256,8 +256,8 @@ export class WikiStorage {
       const node=await this.pendingNode(identity,pk);
       bytes+=Buffer.byteLength(JSON.stringify(node));
       if(node.active) {
-        const response=await this.db.send(new GetCommand({TableName:this.table,Key:{pk:node.answerId},ConsistentRead:true,ProjectionExpression:'pk, environmentId, appId, teamId, purged, #work.#status, #work.#until, #work.#adoption',ExpressionAttributeNames:{'#work':'work','#status':'status','#until':'until','#adoption':'adoptionKey'}}),{abortSignal:this.signal});
-        const answer=response.Item as (GroupIdentity & {pk:string;purged?:boolean;work:Pick<WorkState,'status'|'until'|'adoptionKey'>})|undefined;
+        const response=await this.db.get({namespace:this.table,key:{pk:node.answerId},consistent:true,projection:["pk", "environmentId", "appId", "teamId", "purged", "#work.#status", "#work.#until", "#work.#adoption"],fields:{'#work':'work','#status':'status','#until':'until','#adoption':'adoptionKey'}}, {abortSignal:this.signal});
+        const answer=response.item as (GroupIdentity & {pk:string;purged?:boolean;work:Pick<WorkState,'status'|'until'|'adoptionKey'>})|undefined;
         if(!answer) throw new AppError('missing_wiki_answer');requireIdentity(answer,identity);
         if(answer.pk!==node.answerId || !answer.work || !pendingWork(answer.work) || answer.purged) throw new AppError('invalid_wiki_task');
         bytes+=Buffer.byteLength(JSON.stringify(answer));
@@ -287,13 +287,13 @@ export class WikiStorage {
   async transitionReferences(item:Consultation,from:Consultation['status'],patch:Partial<Consultation>,condition?:ConsultationCondition):Promise<boolean> {
     const identity={environmentId:string(item.environmentId),appId:string(item.appId),teamId:item.teamId};
     const root=await this.root(identity);
-    const extra=dynamoConsultationCondition(condition);
+    const extra=documentConsultationCondition(condition);
     const references=patch.knowledgeReferences!;
     if(expiredCitations(references.flatMap(reference=>reference.origins ?? []),root,Date.now())) throw new AppError('knowledge_changed');
     await this.erasures.reserve(root,[{pk:item.pk,citations:references.flatMap(reference=>reference.origins ?? [])}]);
     const entries=Object.entries(patch),names=Object.fromEntries(entries.map(([key],i)=>[`#p${i}`,key])),values=Object.fromEntries(entries.map(([,value],i)=>[`:p${i}`,value]));
     try {
-      await this.db.send(new TransactWriteCommand({TransactItems:[this.erasures.rootCheck(root),{Update:{TableName:this.table,Key:{pk:item.pk},UpdateExpression:'SET '+entries.map((_,i)=>`#p${i} = :p${i}`).join(', '),ConditionExpression:'#status = :from AND attribute_not_exists(wikiErasedAt)'+(extra ? ' AND '+extra.expression:''),ExpressionAttributeNames:{...names,'#status':'status'},ExpressionAttributeValues:{...values,':from':from,...extra?.values}}}]}),{abortSignal:this.signal});return true;
+      await this.db.transaction({operations:[this.erasures.rootCheck(root),{update:{namespace:this.table,key:{pk:item.pk},changes:entries.map((_,i)=>c.set(`#p${i}`, `:p${i}`)),condition:c.all(c.compare('#status', '=', ':from'), c.absent('wikiErasedAt'), extra?.condition),fields:{...names,'#status':'status'},parameters:{...values,':from':from,...extra?.values}}}]}, {abortSignal:this.signal});return true;
     } catch(error) {if(error instanceof Error && error.name==='TransactionCanceledException') return false;throw error;}
   }
   async purgeHistory(config:GroupConfig,cursor:string):Promise<string|undefined> {
@@ -306,8 +306,8 @@ export class WikiStorage {
     let candidate:string|undefined=resume ?? cursor;
     for(let count=0;candidate && count<wikiLimits.historyPage;count++) {
       if(!/^wiki-answer#[a-f0-9]{64}$/.test(candidate) || visited.has(candidate)) throw new AppError('invalid_wiki_history');visited.add(candidate);
-      const response=await this.db.send(new GetCommand({TableName:this.table,Key:{pk:candidate},ConsistentRead:true,ProjectionExpression:'pk, id, environmentId, appId, teamId, sentAt, purged, #next',ExpressionAttributeNames:{'#next':'next'}}),{abortSignal:this.signal});
-      const metadata=response.Item as Pick<AnswerRecord,'pk'|'id'|'environmentId'|'appId'|'teamId'|'sentAt'|'purged'|'next'>|undefined;
+      const response=await this.db.get({namespace:this.table,key:{pk:candidate},consistent:true,projection:["pk", "id", "environmentId", "appId", "teamId", "sentAt", "purged", "#next"],fields:{'#next':'next'}}, {abortSignal:this.signal});
+      const metadata=response.item as Pick<AnswerRecord,'pk'|'id'|'environmentId'|'appId'|'teamId'|'sentAt'|'purged'|'next'>|undefined;
       if(!metadata) throw new AppError('missing_wiki_answer');requireIdentity(metadata,config);
       if(metadata.pk!==candidate || metadata.id!==candidate || !Number.isFinite(Date.parse(metadata.sentAt)) || metadata.next===candidate || metadata.next!==undefined && !/^wiki-answer#[a-f0-9]{64}$/.test(metadata.next)) throw new AppError('invalid_wiki_history');
       if(resume===candidate && !metadata.purged) throw new AppError('invalid_wiki_erasure_index');
@@ -333,8 +333,8 @@ export class WikiStorage {
       if(sealed.cursor) next.erasureCursor=record.id;
       const snapshot=itemSnapshot(record as unknown as Record<string,unknown>,[...immutableAnswerFields,'purged']);
       await this.purgeTransaction(config,root,next,[...index,this.erasures.putHead(sealed,head),
-        {Put:{TableName:this.table,Item:purged,ConditionExpression:'#work = :work AND '+snapshot.expression,ExpressionAttributeNames:{'#work':'work',...snapshot.names},ExpressionAttributeValues:{':work':record.work,...snapshot.values}}},
-        {Update:{TableName:this.table,Key:{pk:record.requestId},UpdateExpression:'SET wikiErasedAt = :erased REMOVE question, questionCapture, draft, answer, knowledgeReferences',ConditionExpression:'#s = :sent AND wikiAnswerId = :id',ExpressionAttributeNames:{'#s':'status'},ExpressionAttributeValues:{':sent':'sent',':id':record.id,':erased':Date.now()}}}
+        {put:{namespace:this.table,item:purged,condition: c.all(c.compare("#work","=",":work"),snapshot.condition),fields:{'#work':'work',...snapshot.names},parameters:{':work':record.work,...snapshot.values}}},
+        {update:{namespace:this.table,key:{pk:record.requestId},changes: [c.set("wikiErasedAt",":erased"),c.remove("question"),c.remove("questionCapture"),c.remove("draft"),c.remove("answer"),c.remove("knowledgeReferences")],condition: c.all(c.compare("#s","=",":sent"),c.compare("wikiAnswerId","=",":id")),fields:{'#s':'status'},parameters:{':sent':'sent',':id':record.id,':erased':Date.now()}}}
       ]);
       root=next;head=sealed;
     }
@@ -349,8 +349,8 @@ export class WikiStorage {
         if(!isDeepStrictEqual(stored,cleaned)) {
           const fields=target.pk.startsWith('request#') ? ['knowledgeReferences','status','wikiErasedAt']:['pages','references','dependencies','work','purged','approval','targets','command','result'];
           const snapshot=itemSnapshot(stored,fields);
-          if(target.pk.startsWith('request#')) writes.push({Update:{TableName:this.table,Key:{pk:target.pk},UpdateExpression:'SET knowledgeReferences = :refs, wikiErasedAt = :erased'+(['generating','draft'].includes(String(stored.status)) ? ' REMOVE draft, answer':''),ConditionExpression:snapshot.expression,ExpressionAttributeNames:snapshot.names,ExpressionAttributeValues:{...snapshot.values,':refs':cleaned.knowledgeReferences,':erased':Date.now()}}});
-          else writes.push({Put:{TableName:this.table,Item:cleaned,ConditionExpression:snapshot.expression,ExpressionAttributeNames:snapshot.names,ExpressionAttributeValues:snapshot.values}});
+          if(target.pk.startsWith('request#')) writes.push({update:{namespace:this.table,key:{pk:target.pk},changes: [...[c.set("knowledgeReferences",":refs"),c.set("wikiErasedAt",":erased")],...(['generating','draft'].includes(String(stored.status)) ? [c.remove("draft"),c.remove("answer")] : [])],condition: snapshot.condition,fields:snapshot.names,parameters:{...snapshot.values,':refs':cleaned.knowledgeReferences,':erased':Date.now()}}});
+          else writes.push({put:{namespace:this.table,item:cleaned,condition: snapshot.condition,fields:snapshot.names,parameters:snapshot.values}});
         }
       }
       const next={...root,version:root.version+1};
@@ -390,9 +390,9 @@ export class WikiStorage {
     await this.purgeTransaction(config,current,next,[]);
   }
   private async purgeTransaction(config:GroupConfig,root:WikiRoot,next:WikiRoot,writes:TransactionItems):Promise<void> {
-    const transaction:TransactionItems=[{Put:this.rootPut(root,next)},...writes,{ConditionCheck:{TableName:this.table,Key:{pk:'roughmate'},ConditionExpression:'#v = :v AND environmentId = :env AND appId = :app AND teamId = :team AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)'+(config.lifecycle==='archived' ? ' AND lifecycle = :archived AND stopId = :stopId':''),ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':now':Math.floor(Date.now()/1000),...(config.lifecycle==='archived' ? {':archived':'archived',':stopId':config.stopId}:{})}}}];
+    const transaction:TransactionItems=[{put:this.rootPut(root,next)},...writes,{check:{namespace:this.table,key:{pk:'roughmate'},condition: c.all(c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))),(config.lifecycle==='archived' ? c.all(c.compare("lifecycle","=",":archived"),c.compare("stopId","=",":stopId")) : undefined)),fields:{'#v':'version'},parameters:{':v':config.version,':env':config.environmentId,':app':config.appId,':team':config.teamId,':now':Math.floor(Date.now()/1000),...(config.lifecycle==='archived' ? {':archived':'archived',':stopId':config.stopId}:{})}}}];
     transactionSize(transaction);
-    try {await this.db.send(new TransactWriteCommand({TransactItems:transaction}),{abortSignal:this.signal});}
+    try {await this.db.transaction({operations:transaction}, {abortSignal:this.signal});}
     catch(error) {if(error instanceof Error && error.name==='TransactionCanceledException') throw new AppError('wiki_conflict');throw error;}
   }
 }

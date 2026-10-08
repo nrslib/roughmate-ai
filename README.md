@@ -1,8 +1,8 @@
 # Roughmate AI
 
-Slackの相談窓口をAWSへセルフホストするアプリケーションです。相談を受けてAIが回答案を作り、対応チャンネルの人が採用・編集して元のスレッドへ返信します。登録窓口BotのHomeからチームごとのBotを追加でき、各Botが専用の設定・資料・LLM Wiki・回答集を持ちます。
+Slackの相談窓口をAWSまたはGoogle Cloudへセルフホストするアプリケーションです。相談を受けてAIが回答案を作り、対応チャンネルの人が採用・編集して元のスレッドへ返信します。登録窓口BotのHomeからチームごとのBotを追加でき、各Botが専用の設定・資料・LLM Wiki・回答集を持ちます。
 
-このリポジトリは、AWS版を導入・運用するためのSource Availableスナップショットです。ライセンスは [PolyForm Shield 1.0.0](LICENSE) です。利用・改変・配布の条件と競合製品に関する制限は全文を確認してください。
+このリポジトリは、AWS版とGoogle Cloud版を導入・運用するためのSource Availableスナップショットです。Google Cloudへの導入は [Google Cloudセルフホスティング](docs/google-cloud.md) を参照してください。以下はAWS版の手順です。ライセンスは [PolyForm Shield 1.0.0](LICENSE) です。利用・改変・配布の条件と競合製品に関する制限は全文を確認してください。
 
 ## 必要なもの
 
@@ -132,4 +132,4 @@ npm run build
 
 ## 配布内容
 
-アプリ・CLI・ビルド・AWS Terraform・Slack Manifest・IAM generatorと利用者向け資料を含みます。テストと内部検証資料は配布対象外です。`.source-snapshot.json` は元ソースcommit、許可リストhash、配布ファイルhashを記録します。現時点の配布対象はAWS版です。
+アプリ・CLI・ビルド・AWS/Google Cloud Terraform・Slack Manifest・AWS IAM generatorと利用者向け資料を含みます。テストと内部検証資料は配布対象外です。`.source-snapshot.json` は元ソースcommit、許可リストhash、配布ファイルhashを記録します。AWS版とGoogle Cloud版の両方を配布します。

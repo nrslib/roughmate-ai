@@ -1,7 +1,7 @@
+import { c, type DocumentStore } from './document-store.js';
+import { runtime } from './runtime.js';
 import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { KnownBlock, View } from '@slack/web-api';
 import { AppError, object, string, requireInstalledSecrets, type Workspace, type Secrets } from './contracts.js';
 import { Storage } from './storage.js';
@@ -22,11 +22,7 @@ export interface Registration {
 export interface Registry { pk: typeof registrationKey; version: number; parentSecret: string; entries: Registration[]; archiveHead?:string; archiveRetentionCursor?:string; deleteNextAt?:number; deleting?: boolean; removingAppId?: string; homeNoticeOwner?: string; homeNoticeUntil?: number; }
 export interface BotResources { tableName: string; secretName: string; secretPrefix: string; }
 export function childResources(parentTable: string, parentSecret: string, id: string): BotResources {
-  if (!/^[a-f0-9]{32}$/.test(id) || !/^roughmate-[a-z0-9-]+$/.test(parentTable)) throw new AppError('registration_boundary');
-  const match = /^arn:aws:secretsmanager:([a-z0-9-]+):(\d{12}):secret:(roughmate-[a-z0-9-]+)\/runtime-[A-Za-z0-9]{6}$/.exec(parentSecret);
-  if (!match || match[3] !== parentTable) throw new AppError('registration_boundary');
-  const secretName = `${parentTable}/bots/${id}/runtime`;
-  return { tableName: `${parentTable}-bot-${id}`, secretName, secretPrefix: `arn:aws:secretsmanager:${match[1]}:${match[2]}:secret:${secretName}-` };
+  return runtime().children.names(parentTable, parentSecret, id);
 }
 export function validateRegistrationInput(value: unknown): Pick<Registration, 'name' | 'botName' | 'description'> {
   const raw = object(value);
@@ -37,11 +33,11 @@ export function validateRegistrationInput(value: unknown): Pick<Registration, 'n
   return { name, description, botName };
 }
 export class Registrations {
-  private db: DynamoDBDocumentClient;
+  private db: DocumentStore;
   readonly root: Storage;
   constructor(readonly parentTable: string, readonly parentSecret: string, private signal?: AbortSignal, private region?: string) {
     this.root = new Storage(parentTable, parentSecret, signal, region);
-    this.db = DynamoDBDocumentClient.from(new DynamoDBClient({ region, maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } }));
+    this.db = runtime().documents(region);
   }
   async read(): Promise<Registry> {
     const raw = await this.root.get<Registry>(registrationKey);
@@ -57,7 +53,7 @@ export class Registrations {
       if (seen.has(entry.id) || !['queued','resources','creating','created','install_wait','available','failed'].includes(entry.phase) || !Number.isSafeInteger(entry.expiresAt) || !/^[UW][A-Z0-9]+$/.test(entry.actor) || !/^T[A-Z0-9]+$/.test(entry.teamId) || !/^A[A-Z0-9]+$/.test(entry.parentAppId)) throw new AppError('registration_boundary');
       if(entry.deletion && (!/^[a-f0-9]{32}$/.test(entry.deletion.id) || entry.deletion.actor!==entry.actor || !['queued','unknown','failed'].includes(entry.deletion.status) || !Number.isSafeInteger(entry.deletion.requestedAt) || !Number.isSafeInteger(entry.deletion.notBefore))) throw new AppError('registration_boundary');
       seen.add(entry.id);
-      if (entry.secretArn && (!entry.secretArn.startsWith(resources.secretPrefix) || !/^[A-Za-z0-9]{6}$/.test(entry.secretArn.slice(resources.secretPrefix.length)))) throw new AppError('registration_boundary');
+      if (entry.secretArn && (!runtime().children.validSecret(resources, entry.secretArn))) throw new AppError('registration_boundary');
       if (entry.appId && (!/^A[A-Z0-9]+$/.test(entry.appId) || entry.appId === entry.parentAppId || apps.has(entry.appId))) throw new AppError('registration_boundary');
       if (entry.appId) apps.add(entry.appId);
       if ([entry.createRetryAt,entry.oauthRetryAt].some(time => time !== undefined && (!Number.isSafeInteger(time) || time < 0 || !Number.isFinite(new Date(time*1000).getTime())))) throw new AppError('registration_boundary');
@@ -96,9 +92,9 @@ export class Registrations {
   }
   private async put(previous: Registry, next: Registry, owner?: string): Promise<Registry> {
     try {
-      await this.db.send(new PutCommand({ TableName: this.parentTable, Item: next,
-        ConditionExpression: previous.version === 0 ? 'attribute_not_exists(pk)' : '#version = :version AND parentSecret = :parent AND '+(owner ? 'homeNoticeOwner = :noticeOwner' : '(attribute_not_exists(homeNoticeUntil) OR homeNoticeUntil <= :now)'),
-        ...(previous.version ? { ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': previous.version, ':parent': this.parentSecret, ...(owner ? { ':noticeOwner': owner } : { ':now': Math.floor(Date.now()/1000) }) } } : {}) }), { abortSignal: this.signal });
+      await this.db.put({ namespace: this.parentTable, item: next,
+        condition: (previous.version === 0 ? c.absent("pk") : c.all(c.all(c.compare("#version","=",":version"),c.compare("parentSecret","=",":parent")),(owner ? c.compare("homeNoticeOwner","=",":noticeOwner") : c.group(c.any(c.absent("homeNoticeUntil"),c.compare("homeNoticeUntil","<=",":now")))))),
+        ...(previous.version ? { fields: { '#version': 'version' }, parameters: { ':version': previous.version, ':parent': this.parentSecret, ...(owner ? { ':noticeOwner': owner } : { ':now': Math.floor(Date.now()/1000) }) } } : {}) }, { abortSignal: this.signal });
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('registration_conflict'); throw error; }
     return next;
   }
@@ -137,11 +133,11 @@ export class Registrations {
     const entry: Registration = { id, ...values, actor, teamId: workspace.teamId, parentAppId: appId, phase: 'queued', expiresAt: Math.floor(Date.now()/1000) + 21*86400 };
     await this.requireRootBotIdentity(workspace, appId, secrets, deadline);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ConditionCheck: { TableName: this.parentTable, Key: { pk: 'workspace' }, ConditionExpression: 'teamId = :team AND ownerId = :actor', ExpressionAttributeValues: { ':team': workspace.teamId, ':actor': actor } } },
-        { ConditionCheck: { TableName: this.parentTable, Key: { pk: `registration#${id}` }, ConditionExpression: 'actor = :actor AND teamId = :team AND appId = :app AND expiresAt > :now', ExpressionAttributeValues: { ':actor': actor, ':team': workspace.teamId, ':app': appId, ':now': Math.floor(Date.now()/1000) } } },
-        { Put: { TableName: this.parentTable, Item: { ...registry, version: registry.version+1, entries: [...registry.entries, entry] }, ConditionExpression: registry.version === 0 ? 'attribute_not_exists(pk)' : '#version = :version AND parentSecret = :parent AND (attribute_not_exists(homeNoticeUntil) OR homeNoticeUntil <= :now)', ...(registry.version ? { ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': registry.version, ':parent': this.parentSecret, ':now': Math.floor(Date.now()/1000) } } : {}) } }
-      ] }), { abortSignal: this.signal });
+      await this.db.transaction({ operations: [
+        { check: { namespace: this.parentTable, key: { pk: 'workspace' }, condition: c.all(c.compare("teamId","=",":team"),c.compare("ownerId","=",":actor")), parameters: { ':team': workspace.teamId, ':actor': actor } } },
+        { check: { namespace: this.parentTable, key: { pk: `registration#${id}` }, condition: c.all(c.compare("actor","=",":actor"),c.compare("teamId","=",":team"),c.compare("appId","=",":app"),c.compare("expiresAt",">",":now")), parameters: { ':actor': actor, ':team': workspace.teamId, ':app': appId, ':now': Math.floor(Date.now()/1000) } } },
+        { put: { namespace: this.parentTable, item: { ...registry, version: registry.version+1, entries: [...registry.entries, entry] }, condition: (registry.version === 0 ? c.absent("pk") : c.all(c.compare("#version","=",":version"),c.compare("parentSecret","=",":parent"),c.group(c.any(c.absent("homeNoticeUntil"),c.compare("homeNoticeUntil","<=",":now"))))), ...(registry.version ? { fields: { '#version': 'version' }, parameters: { ':version': registry.version, ':parent': this.parentSecret, ':now': Math.floor(Date.now()/1000) } } : {}) } }
+      ] }, { abortSignal: this.signal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('registration_conflict'); throw error; }
     return entry;
   }

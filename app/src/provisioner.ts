@@ -1,13 +1,10 @@
+import { runtime } from './runtime.js';
 import { enqueueArchiveRetention } from './wiki-queue.js';
 import { BotMaintenance } from './bot-maintenance.js';
 import { invitationScopes } from './channel-authorization.js';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { ErrorCode } from '@slack/web-api';
 import type { SQSEvent, SQSBatchResponse } from 'aws-lambda';
-import { DynamoDBClient, CreateTableCommand, DescribeTableCommand, DescribeTimeToLiveCommand, ListTagsOfResourceCommand, UpdateTimeToLiveCommand, type TableDescription, type Tag } from '@aws-sdk/client-dynamodb';
-import { SecretsManagerClient, CreateSecretCommand, DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { AppError, env, object, string, type Secrets } from './contracts.js';
 import { diagnosticCode } from './diagnostics.js';
 import { Registrations, childResources, configurationKey, type Registry, type Registration } from './registration.js';
@@ -32,12 +29,11 @@ export function childManifest(entry: Registration, publicUrl: string, connected:
     oauth_config: { scopes: { bot: childScopes, user: invitationScopes }, ...(connected ? { redirect_urls: [`${base}/oauth/callback`, `${base}/channel-authorization/callback`] } : {}) },
     ...(connected ? { settings: { event_subscriptions: { request_url: `${base}/slack/events`, bot_events: ['app_mention','app_home_opened'] }, interactivity: { is_enabled: true, request_url: `${base}/slack/interactive` }, org_deploy_enabled: false, socket_mode_enabled: false, token_rotation_enabled: false } } : {}) };
 }
-const db = new DynamoDBClient({ maxAttempts: 1 });
-const secrets = new SecretsManagerClient({ maxAttempts: 1 });
-const queue = new SQSClient({ maxAttempts: 1 });
+const secrets = runtime().secrets();
+const queue = runtime().queue();
 export const OAUTH_CALLBACK_BUDGET_MS = 8500;
-const callbackSecrets = new SecretsManagerClient({ maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } });
-const callbackQueue = new SQSClient({ maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } });
+const callbackSecrets = runtime().secrets();
+const callbackQueue = runtime().queue();
 async function patch(registrations: Registrations, registry: Registry, entry: Registration, changes: Partial<Registration>, clear: (keyof Registration)[] = []): Promise<Registry> {
   return registrations.save(registry, registry.entries.map(item => {
     if (item.id !== entry.id) return item;
@@ -79,67 +75,14 @@ export function confirmedCreateFailure(raw: unknown, entry: Registration): Failu
   if (entry.appId || value.appId || value.credentials || proof.appId !== null || proof.secretArn !== entry.secretArn || proof.name !== entry.name || proof.botName !== entry.botName || proof.description !== entry.description || checked.retryAt !== 0 || !createRejections.some(code => `slack_${code}` === checked.failureCode)) throw new AppError('registration_boundary');
   return checked;
 }
-async function waitForChildTable(tableName: string, tableArn: string, tags: Tag[]): Promise<void> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
-  try {
-    for (;;) {
-      controller.signal.throwIfAborted();
-      let table: TableDescription | undefined;
-      try {
-        table = (await db.send(new DescribeTableCommand({ TableName: tableName }), { abortSignal: controller.signal })).Table;
-        if (!table) throw new AppError('registration_resources_pending');
-      } catch (error) {
-        // 作成直後はDescribeTableのmetadataがまだ反映されない場合がある。
-        if (!(error instanceof Error) || error.name !== 'ResourceNotFoundException') throw error;
-      }
-      if (table) {
-        if (table.TableName !== tableName || table.TableArn !== tableArn || table.KeySchema?.length !== 1 || table.KeySchema[0].AttributeName !== 'pk' || table.KeySchema[0].KeyType !== 'HASH' || table.AttributeDefinitions?.length !== 1 || table.AttributeDefinitions[0].AttributeName !== 'pk' || table.AttributeDefinitions[0].AttributeType !== 'S') throw new AppError('registration_boundary');
-        if (table.TableStatus === 'ACTIVE') {
-          const tableTags = (await db.send(new ListTagsOfResourceCommand({ ResourceArn: tableArn }), { abortSignal: controller.signal })).Tags;
-          controller.signal.throwIfAborted();
-          if (!tags.every(tag => tableTags?.some(actual => actual.Key === tag.Key && actual.Value === tag.Value))) throw new AppError('registration_boundary');
-          return;
-        }
-        if (table.TableStatus !== 'CREATING') throw new AppError('registration_resources_pending');
-      }
-      await delay(1000, undefined, { signal: controller.signal });
-    }
-  } catch (error) {
-    if (controller.signal.aborted && !(error instanceof AppError)) throw new AppError('registration_resources_pending');
-    throw error;
-  } finally { clearTimeout(timer); }
-}
 async function resources(registrations: Registrations, entry: Registration): Promise<string> {
-  const target = childResources(registrations.parentTable, registrations.parentSecret, entry.id);
-  const tags = [{ Key: 'RoughmateParent', Value: registrations.parentTable }, { Key: 'RegistrationId', Value: entry.id }];
-  try { await db.send(new CreateTableCommand({ TableName: target.tableName, BillingMode: 'PAY_PER_REQUEST', KeySchema: [{ AttributeName: 'pk', KeyType: 'HASH' }], AttributeDefinitions: [{ AttributeName: 'pk', AttributeType: 'S' }], Tags: tags })); }
-  catch (error) { if (!(error instanceof Error) || error.name !== 'ResourceInUseException') throw error; }
-  const parentArn = registrations.parentSecret.split(':');
-  await waitForChildTable(target.tableName, `arn:aws:dynamodb:${parentArn[3]}:${parentArn[4]}:table/${target.tableName}`, tags);
-  const ttl = (await db.send(new DescribeTimeToLiveCommand({ TableName: target.tableName }))).TimeToLiveDescription;
-  if (ttl?.TimeToLiveStatus === 'ENABLED' || ttl?.TimeToLiveStatus === 'ENABLING') {
-    if (ttl.AttributeName !== 'expiresAt') throw new AppError('registration_boundary');
-  } else if (ttl?.TimeToLiveStatus === 'DISABLED') await db.send(new UpdateTimeToLiveCommand({ TableName: target.tableName, TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true } }));
-  else throw new AppError('registration_resources_pending');
-  let arn: string;
-  try {
-    const root = await registrations.root.readSecrets();
-    arn = string((await secrets.send(new CreateSecretCommand({ Name: target.secretName, ClientRequestToken: entry.id, SecretString: JSON.stringify({ apiKey: root.apiKey, model: root.model }), Tags: tags }))).ARN);
-  } catch (error) {
-    if (!(error instanceof Error) || error.name !== 'ResourceExistsException') throw error;
-    const existing = await secrets.send(new DescribeSecretCommand({ SecretId: target.secretName }));
-    if (existing.Name !== target.secretName || existing.DeletedDate || !tags.every(tag => existing.Tags?.some(actual => actual.Key === tag.Key && actual.Value === tag.Value))) throw new AppError('registration_boundary');
-    arn = string(existing.ARN);
-  }
-  if (!arn.startsWith(target.secretPrefix) || !/^[A-Za-z0-9]{6}$/.test(arn.slice(target.secretPrefix.length))) throw new AppError('registration_boundary');
-  return arn;
+  return runtime().children.ensure(registrations, entry);
 }
 async function createdSecrets(entry: Registration): Promise<Secrets | FailureProof | undefined> {
   if (!entry.secretArn || !entry.createOwner) throw new AppError('registration_boundary');
   try {
-    const result = await secrets.send(new GetSecretValueCommand({ SecretId: entry.secretArn, VersionId: entry.createOwner }));
-    const value = object(JSON.parse(string(result.SecretString)));
+    const result = await secrets.read({ id: string(entry.secretArn), version: entry.createOwner });
+    const value = object(JSON.parse(string(result)));
     if (value.registrationFailure) return object(value.registrationFailure).kind === 'create_rejected' ? confirmedCreateFailure(value, entry) : checkedProof(value.registrationFailure, entry, entry.createOwner, 'create_rate_limited');
     for (const field of ['appId','clientId','clientSecret','signingSecret','model','apiKey']) string(value[field]);
     return value as unknown as Secrets;
@@ -157,8 +100,8 @@ export async function provision(raw: string): Promise<void> {
   if (job.kind === 'rotate') {
     const pendingHomes = await registrations.read();
     if (pendingHomes.deleting) return;
-    for(const entry of pendingHomes.entries.filter(entry=>entry.deletion && entry.deletion.status!=='failed')) await queue.send(new SendMessageCommand({QueueUrl:env('PROVISION_QUEUE_URL'),MessageBody:JSON.stringify({kind:'delete_bot',id:entry.id,actor:entry.actor,teamId:entry.teamId,appId:entry.parentAppId})}));
-    for (const entry of pendingHomes.entries.filter(item => !item.deletion && (item.homeNotificationPending || item.phase === 'install_wait' && item.installOwner) && (item.phase === 'available' || item.expiresAt > Math.floor(Date.now()/1000)))) await queue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }));
+    for(const entry of pendingHomes.entries.filter(entry=>entry.deletion && entry.deletion.status!=='failed')) await queue.enqueue({destination:env('PROVISION_QUEUE_URL'),body:JSON.stringify({kind:'delete_bot',id:entry.id,actor:entry.actor,teamId:entry.teamId,appId:entry.parentAppId})});
+    for (const entry of pendingHomes.entries.filter(item => !item.deletion && (item.homeNotificationPending || item.phase === 'install_wait' && item.installOwner) && (item.phase === 'available' || item.expiresAt > Math.floor(Date.now()/1000)))) await queue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) });
     const maintenance=new BotMaintenance(registrations),archives=await maintenance.archives(pendingHomes.archiveRetentionCursor);
     for(const archived of archives.items) {
       const resolved=await maintenance.browserBot(archived.entry.id);
@@ -173,7 +116,7 @@ export async function provision(raw: string): Promise<void> {
     await access.token(false);
     const registry = await registrations.read();
     if (registry.deleting) return;
-    for (const entry of registry.entries.filter(item => !item.deletion && ['queued','resources','creating','created'].includes(item.phase) && item.expiresAt > Math.floor(Date.now()/1000) && (!item.createRetryAt || item.createRetryAt <= Math.floor(Date.now()/1000)))) await queue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }));
+    for (const entry of registry.entries.filter(item => !item.deletion && ['queued','resources','creating','created'].includes(item.phase) && item.expiresAt > Math.floor(Date.now()/1000) && (!item.createRetryAt || item.createRetryAt <= Math.floor(Date.now()/1000)))) await queue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) });
     return;
   }
   if (job.kind !== 'provision') throw new AppError('invalid_input');
@@ -245,14 +188,14 @@ export async function provision(raw: string): Promise<void> {
     catch (error) {
       const retryAt = rateLimitUntil(error);
       if (retryAt) {
-        await secrets.send(new PutSecretValueCommand({ SecretId: string(entry.secretArn), ClientRequestToken: createOwner, SecretString: JSON.stringify({ registrationFailure: failureProof(entry, createOwner, 'create_rate_limited', 'ratelimited', retryAt) }) }));
+        await secrets.write({ id: string(entry.secretArn), operationId: createOwner, value: JSON.stringify({ registrationFailure: failureProof(entry, createOwner, 'create_rate_limited', 'ratelimited', retryAt) }) });
         await patch(registrations, registry, entry, { createRetryAt: retryAt });
         return;
       }
       const failure = createRejection(error);
       if (failure) {
         const proof = { ...failureProof(entry, createOwner, 'create_rejected', failure), appId: null, secretArn: entry.secretArn, name: entry.name, botName: entry.botName, description: entry.description };
-        await secrets.send(new PutSecretValueCommand({ SecretId: string(entry.secretArn), ClientRequestToken: createOwner, SecretString: JSON.stringify({ registrationFailure: proof }) }));
+        await secrets.write({ id: string(entry.secretArn), operationId: createOwner, value: JSON.stringify({ registrationFailure: proof }) });
         await fail(failure);
         return;
       }
@@ -262,7 +205,7 @@ export async function provision(raw: string): Promise<void> {
     const credentials = object(result.credentials);
     const root = await registrations.root.readSecrets();
     const value: Secrets = { appId: string(result.app_id), clientId: string(credentials.client_id), clientSecret: string(credentials.client_secret), signingSecret: string(credentials.signing_secret), apiKey: root.apiKey, model: root.model };
-    await secrets.send(new PutSecretValueCommand({ SecretId: string(entry.secretArn), ClientRequestToken: createOwner, SecretString: JSON.stringify(value) }));
+    await secrets.write({ id: string(entry.secretArn), operationId: createOwner, value: JSON.stringify(value) });
   }
   if (entry.phase === 'creating') {
     const recovered = await createdSecrets(entry);
@@ -328,7 +271,7 @@ async function notifyRegistrationHomes(registrations: Registrations, id: string)
   for (const job of [
     ...(entry.phase === 'available' ? [{ kind: 'home', botId: entry.id, payload: { environmentId: entry.secretArn, appId: entry.appId, teamId: entry.teamId, userId: entry.actor } }] : []),
     { kind: 'home', payload: { environmentId: registrations.parentSecret, appId: entry.parentAppId, teamId: entry.teamId, userId: entry.actor } }
-  ]) await queue.send(new SendMessageCommand({ QueueUrl: env('QUEUE_URL'), MessageBody: JSON.stringify(job) }));
+  ]) await queue.enqueue({ destination: env('QUEUE_URL'), body: JSON.stringify(job) });
   await patch(registrations, registry, entry, {}, ['homeNotificationPending']);
 }
 async function recoverInstall(registrations: Registrations, id: string): Promise<'available' | 'rejected'> {
@@ -336,9 +279,9 @@ async function recoverInstall(registrations: Registrations, id: string): Promise
   const { entry, store } = await registrations.child(id, false);
   if (entry.phase !== 'install_wait' || !entry.installOwner || entry.expiresAt <= Math.floor(Date.now()/1000)) throw new AppError('invalid_state');
   let saved;
-  try { saved = await secrets.send(new GetSecretValueCommand({ SecretId: string(entry.secretArn), VersionId: entry.installOwner })); }
+  try { saved = await secrets.read({ id: string(entry.secretArn), version: entry.installOwner }); }
   catch (error) { if (error instanceof Error && error.name === 'ResourceNotFoundException') throw new AppError('oauth_install_unknown'); throw error; }
-  const value = object(JSON.parse(string(saved.SecretString)));
+  const value = object(JSON.parse(string(saved)));
   if (value.registrationFailure) {
     const proof = checkedProof(value.registrationFailure, entry, entry.installOwner, 'oauth_rejected');
     await patch(registrations, registry, entry, { failureCode: proof.failureCode, oauthRetryAt: proof.retryAt, homeNotificationPending: true }, ['installOwner','oauthState','oauthExpiresAt']);
@@ -359,7 +302,7 @@ export async function installChild(registrations: Registrations, id: string, sta
     if (typeof response !== 'string') {
       if (response.error !== 'access_denied' || entry.installOwner) throw new AppError('invalid_state');
       await deadline.step(() => patch(registrations, registry, entry, { failureCode: 'access_denied', homeNotificationPending: true }, ['oauthState','oauthExpiresAt']));
-      try { await deadline.step(() => callbackQueue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }), { abortSignal: deadline.signal })); }
+      try { await deadline.step(() => callbackQueue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }, { abortSignal: deadline.signal })); }
       catch (error) { process.stderr.write(JSON.stringify({ event: 'roughmate_denied_home_pending', code: diagnosticCode(error) })+'\n'); }
       throw new AppError('oauth_rejected');
     }
@@ -369,7 +312,7 @@ export async function installChild(registrations: Registrations, id: string, sta
       const latest = await deadline.step(() => registrations.read());
       const current = latest.entries.find(item => item.id === id);
       if (latest.deleting || !current || current.installOwner !== installOwner || current.oauthState !== stateKey(state) || !current.oauthExpiresAt || current.oauthExpiresAt <= Math.floor(Date.now()/1000) || current.actor !== entry.actor || current.teamId !== entry.teamId || current.parentAppId !== entry.parentAppId || current.appId !== entry.appId || current.secretArn !== entry.secretArn || !['install_wait','available'].includes(current.phase)) throw new AppError('invalid_state');
-      await deadline.step(() => callbackQueue.send(new SendMessageCommand({ QueueUrl: env('PROVISION_QUEUE_URL'), MessageBody: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }), { abortSignal: deadline.signal }));
+      await deadline.step(() => callbackQueue.enqueue({ destination: env('PROVISION_QUEUE_URL'), body: JSON.stringify({ kind: 'provision', id: entry.id, actor: entry.actor, teamId: entry.teamId, appId: entry.parentAppId }) }, { abortSignal: deadline.signal }));
     };
     const reject = async (proof: FailureProof) => {
       await deadline.step(() => patch(registrations, registry, entry, { failureCode: proof.failureCode, oauthRetryAt: proof.retryAt, homeNotificationPending: true }, ['installOwner','oauthState','oauthExpiresAt']));
@@ -377,9 +320,9 @@ export async function installChild(registrations: Registrations, id: string, sta
     };
     if (entry.installOwner) {
       let saved;
-      try { saved = await deadline.step(() => callbackSecrets.send(new GetSecretValueCommand({ SecretId: entry.secretArn, VersionId: entry.installOwner }), { abortSignal: deadline.signal })); }
+      try { saved = await deadline.step(() => callbackSecrets.read({ id: string(entry.secretArn), version: entry.installOwner }, { abortSignal: deadline.signal })); }
       catch (error) { if (error instanceof Error && error.name === 'ResourceNotFoundException') throw new AppError('oauth_install_unknown'); throw error; }
-      const value = object(JSON.parse(string(saved.SecretString)));
+      const value = object(JSON.parse(string(saved)));
       if (value.registrationFailure) await reject(checkedProof(value.registrationFailure, entry, entry.installOwner, 'oauth_rejected'));
       if (value.appId !== entry.appId || !value.botToken || !value.botUserId) throw new AppError('registration_boundary');
       await enqueue();
@@ -398,7 +341,7 @@ export async function installChild(registrations: Registrations, id: string, sta
       const rejected = oauthRejection(error), retryAt = rateLimitUntil(error);
       if (!rejected && !retryAt) throw new AppError('oauth_install_unknown');
       const proof = failureProof(entry, installOwner, 'oauth_rejected', rejected ?? 'ratelimited', retryAt ?? 0);
-      await deadline.step(() => callbackSecrets.send(new PutSecretValueCommand({ SecretId: entry.secretArn, ClientRequestToken: installOwner, SecretString: JSON.stringify({ ...value, registrationFailure: proof }) }), { abortSignal: deadline.signal }));
+      await deadline.step(() => callbackSecrets.write({ id: string(entry.secretArn), operationId: installOwner, value: JSON.stringify({ ...value, registrationFailure: proof }) }, { abortSignal: deadline.signal }));
       await reject(proof);
     }
     if (!result || result.ok !== true || 'error' in result || result.is_enterprise_install !== undefined && typeof result.is_enterprise_install !== 'boolean') throw new AppError('oauth_install_unknown');
@@ -406,17 +349,17 @@ export async function installChild(registrations: Registrations, id: string, sta
     const mismatch = result.app_id !== entry.appId ? 'oauth_app_mismatch' : result.team.id !== entry.teamId || result.is_enterprise_install ? 'oauth_workspace_mismatch' : result.authed_user.id !== entry.actor ? 'oauth_actor_mismatch' : undefined;
     if (mismatch) {
       const proof = failureProof(entry, installOwner, 'oauth_rejected', mismatch);
-      await deadline.step(() => callbackSecrets.send(new PutSecretValueCommand({ SecretId: entry.secretArn, ClientRequestToken: installOwner, SecretString: JSON.stringify({ ...value, registrationFailure: proof }) }), { abortSignal: deadline.signal }));
+      await deadline.step(() => callbackSecrets.write({ id: string(entry.secretArn), operationId: installOwner, value: JSON.stringify({ ...value, registrationFailure: proof }) }, { abortSignal: deadline.signal }));
       await reject(proof);
     }
     const scopes = string(result.scope).split(',');
     if (childScopes.some(scope => !scopes.includes(scope)) || scopes.some(scope => !childScopes.some(expected => expected === scope))) {
       const proof = failureProof(entry, installOwner, 'oauth_rejected', scopes.some(scope => !childScopes.some(expected => expected === scope)) ? 'oauth_scope_excess' : 'oauth_scope_mismatch');
-      await deadline.step(() => callbackSecrets.send(new PutSecretValueCommand({ SecretId: entry.secretArn, ClientRequestToken: installOwner, SecretString: JSON.stringify({ ...value, registrationFailure: proof }) }), { abortSignal: deadline.signal }));
+      await deadline.step(() => callbackSecrets.write({ id: string(entry.secretArn), operationId: installOwner, value: JSON.stringify({ ...value, registrationFailure: proof }) }, { abortSignal: deadline.signal }));
       await reject(proof);
     }
     const installed: Secrets = { appId: value.appId, clientId: value.clientId, clientSecret: value.clientSecret, signingSecret: value.signingSecret, apiKey: value.apiKey, model: value.model, botUserId: string(result.bot_user_id), botToken: string(result.access_token), botScopes: scopes };
-    await deadline.step(() => callbackSecrets.send(new PutSecretValueCommand({ SecretId: entry.secretArn, ClientRequestToken: installOwner, SecretString: JSON.stringify(installed) }), { abortSignal: deadline.signal }));
+    await deadline.step(() => callbackSecrets.write({ id: string(entry.secretArn), operationId: installOwner, value: JSON.stringify(installed) }, { abortSignal: deadline.signal }));
     await enqueue();
     return 'processing';
   });

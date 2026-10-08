@@ -1,8 +1,8 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { randomBytes } from 'node:crypto';
+import type { SecretStore } from './runtime-ports.js';
+import { c, type DocumentStore, type DocumentOperation } from './document-store.js';
+import { runtime } from './runtime.js';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, DeleteCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
-import { SecretsManagerClient, GetSecretValueCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { AppError, object, string, validateSecrets, type Secrets, type Workspace, type Consultation, type AnswerCancellation } from './contracts.js';
 import type { ChannelAuthorization, ChannelAuthorizationState } from './channel-authorization.js';
 import type { KnowledgeRequest, KnowledgeHead } from './knowledge-ui.js';
@@ -10,7 +10,8 @@ import { WikiStorage } from './wiki-storage.js';
 import { wikiDocuments, wikiContentVersion, originalDocuments, withheldManualIds, manualSource, requireManualSource, wikiLimits, type SourceRecord, type ManualHistory } from './wiki-model.js';
 import { validateGroup, validateCatalog, requireIdentity, requireAdmin, requireIntake, settingsContent, type GroupIdentity, type GroupConfig, type KnowledgeCatalog } from './groups.js';
 import type { ConsultationCondition, ConsultationStore, AnswerClaimStore, DraftPublicationStore } from './consultation-store.js';
-import { dynamoConsultationCondition } from './aws-consultation-condition.js';
+import { documentConsultationCondition } from './consultation-condition.js';
+import { encryptRootOAuthResult, decryptRootOAuthResult, type RootOAuthResult } from './root-oauth-result.js';
 export const settingsRetentionSeconds = 21 * 24 * 60 * 60;
 export interface SettingsReceipt { version: number; expiresAt: number; }
 export function requireSettingsExpiry(expiresAt: unknown): number {
@@ -18,20 +19,20 @@ export function requireSettingsExpiry(expiresAt: unknown): number {
   return expiresAt as number;
 }
 export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublicationStore {
-  private db: DynamoDBDocumentClient;
-  private secrets: SecretsManagerClient;
+  private db: DocumentStore;
+  private secrets: SecretStore;
   readonly wiki: WikiStorage;
   constructor(private table: string, private secretId: string, private abortSignal?: AbortSignal, region?: string, private secretVersion?: string) {
-    this.db = DynamoDBDocumentClient.from(new DynamoDBClient({ region, maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } }));
+    this.db = runtime().documents(region);
     this.wiki = new WikiStorage(this.db, table, abortSignal);
-    this.secrets = new SecretsManagerClient({ region, maxAttempts: 1, requestHandler: { requestTimeout: 900, throwOnRequestTimeout: true, connectionTimeout: 500 } });
+    this.secrets = runtime().secrets(region);
   }
   async get<T>(pk: string): Promise<T | undefined> {
-    const result = await this.db.send(new GetCommand({ TableName: this.table, Key: { pk }, ConsistentRead: true }), { abortSignal: this.abortSignal });
-    return result.Item as T | undefined;
+    const result = await this.db.get({ namespace: this.table, key: { pk }, consistent: true }, { abortSignal: this.abortSignal });
+    return result.item as T | undefined;
   }
   async create(item: Record<string, unknown>): Promise<boolean> {
-    try { await this.db.send(new PutCommand({ TableName: this.table, Item: item, ConditionExpression: 'attribute_not_exists(pk)' }), { abortSignal: this.abortSignal }); return true; }
+    try { await this.db.put({ namespace: this.table, item: item, condition: c.absent("pk") }, { abortSignal: this.abortSignal }); return true; }
     catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return false; throw error; }
   }
   async createConsultation(config: GroupConfig, item: Consultation): Promise<boolean> {
@@ -39,10 +40,10 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     requireIdentity(item as Consultation & GroupIdentity, config);
     if(item.configVersion!==config.version || item.reviewChannel!==config.reviewChannelId) throw new AppError('draft_boundary_changed');
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
-        { Put: { TableName: this.table, Item: item, ConditionExpression: 'attribute_not_exists(pk)' } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
+        { put: { namespace: this.table, item: item, condition: c.absent("pk") } }
+      ] }, { abortSignal: this.abortSignal });
       return true;
     } catch(error) {
       if(!(error instanceof Error) || error.name!=='TransactionCanceledException') throw error;
@@ -78,7 +79,7 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     validateGroup(config);
     const catalog: KnowledgeCatalog = { pk: 'knowledge', environmentId: config.environmentId, appId: config.appId, teamId: config.teamId, version: 1, documents: [] };
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [config, catalog].map(Item => ({ Put: { TableName: this.table, Item, ConditionExpression: 'attribute_not_exists(pk)' } })) }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [config, catalog].map(item => ({ put: { namespace: this.table, item, condition: c.absent("pk") } })) }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async saveGroup(previous: GroupConfig, next: GroupConfig, actor: string, request?: { id: string; version: number; owner?: string; generation?: string }, participation?: { owner: string; generation?: string }): Promise<void> {
@@ -86,46 +87,46 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     requireIdentity(next, previous);
     validateGroup(next);
     if (next.version !== previous.version + 1) throw new AppError('invalid_group_config');
-    const Item = { ...next, postingUntil: 0 };
-    delete Item.publicationOwner;delete Item.publicationKind;
+    const item = { ...next, postingUntil: 0 };
+    delete item.publicationOwner;delete item.publicationKind;
     try {
-      const put = { TableName: this.table, Item,
-        ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND '+(participation ? 'publicationOwner = :owner AND postingUntil > :now' : '(attribute_not_exists(postingUntil) OR postingUntil <= :now)'),
-        ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': previous.version, ':environment': previous.environmentId, ':app': previous.appId, ':team': previous.teamId, ':now': Math.floor(Date.now()/1000), ...(participation ? { ':owner': participation.owner } : {}) } };
-      if (request) await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ...(participation ? { Update: { TableName: this.table, Key: { pk: 'workspace' }, UpdateExpression: 'SET settingsNoticeUntil = :zero REMOVE settingsNoticeOwner', ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND settingsNoticeOwner = :owner AND settingsNoticeUntil > :now', ExpressionAttributeValues: { ':team': previous.teamId, ':version': request.version, ':request': request.id, ':owner': participation.owner, ':now': Math.floor(Date.now()/1000), ':zero': 0 } } } : { ConditionCheck: { TableName: this.table, Key: { pk: 'workspace' }, ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND (attribute_not_exists(settingsNoticeUntil) OR settingsNoticeUntil <= :now)', ExpressionAttributeValues: { ':team': previous.teamId, ':version': request.version, ':request': request.id, ':now': Math.floor(Date.now()/1000) } } }) }, { Put: put },
-        { ConditionCheck: { TableName: this.table, Key: { pk: `settings#${request.id}` }, ConditionExpression: 'teamId = :team AND #version = :version AND expiresAt > :now AND attribute_not_exists(failureCode)' + (request.owner ? ' AND attemptOwner = :owner' : ''), ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': previous.teamId, ':version': request.version, ':now': Math.floor(Date.now()/1000), ...(request.owner ? { ':owner': request.owner } : {}) } } },
-        ...(!participation?.generation && request.generation ? [{ ConditionCheck: { TableName: this.table, Key: { pk: `channel-user#${actor}` }, ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND generation = :generation AND attribute_exists(cipher)', ExpressionAttributeValues: { ':environment': previous.environmentId, ':app': previous.appId, ':team': previous.teamId, ':actor': actor, ':generation': request.generation } } }] : []),
-        ...(participation?.generation ? [{ Update: { TableName: this.table, Key: { pk: `channel-user#${actor}` }, UpdateExpression: 'REMOVE inviteUntil, inviteOwner, inviteStartedChannel', ConditionExpression: 'generation = :generation AND inviteOwner = :owner', ExpressionAttributeValues: { ':generation': participation.generation, ':owner': participation.owner } } }] : [])
-      ] }), { abortSignal: this.abortSignal });
-      else await this.db.send(new PutCommand(put), { abortSignal: this.abortSignal });
+      const put = { namespace: this.table, item,
+        condition: c.all(c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")),(participation ? c.all(c.compare("publicationOwner","=",":owner"),c.compare("postingUntil",">",":now")) : c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now"))))),
+        fields: { '#version': 'version' }, parameters: { ':version': previous.version, ':environment': previous.environmentId, ':app': previous.appId, ':team': previous.teamId, ':now': Math.floor(Date.now()/1000), ...(participation ? { ':owner': participation.owner } : {}) } };
+      if (request) await this.db.transaction({ operations: [
+        { ...(participation ? { update: { namespace: this.table, key: { pk: 'workspace' }, changes: [c.set("settingsNoticeUntil",":zero"),c.remove("settingsNoticeOwner")], condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.compare("settingsNoticeOwner","=",":owner"),c.compare("settingsNoticeUntil",">",":now")), parameters: { ':team': previous.teamId, ':version': request.version, ':request': request.id, ':owner': participation.owner, ':now': Math.floor(Date.now()/1000), ':zero': 0 } } } : { check: { namespace: this.table, key: { pk: 'workspace' }, condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.group(c.any(c.absent("settingsNoticeUntil"),c.compare("settingsNoticeUntil","<=",":now")))), parameters: { ':team': previous.teamId, ':version': request.version, ':request': request.id, ':now': Math.floor(Date.now()/1000) } } }) }, { put: put },
+        { check: { namespace: this.table, key: { pk: `settings#${request.id}` }, condition: c.all(c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("expiresAt",">",":now"),c.absent("failureCode")),(request.owner ? c.compare("attemptOwner","=",":owner") : undefined)), fields: { '#version': 'version' }, parameters: { ':team': previous.teamId, ':version': request.version, ':now': Math.floor(Date.now()/1000), ...(request.owner ? { ':owner': request.owner } : {}) } } },
+        ...(!participation?.generation && request.generation ? [{ check: { namespace: this.table, key: { pk: `channel-user#${actor}` }, condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("generation","=",":generation"),c.exists("cipher")), parameters: { ':environment': previous.environmentId, ':app': previous.appId, ':team': previous.teamId, ':actor': actor, ':generation': request.generation } } }] : []),
+        ...(participation?.generation ? [{ update: { namespace: this.table, key: { pk: `channel-user#${actor}` }, changes: [c.remove("inviteUntil"),c.remove("inviteOwner"),c.remove("inviteStartedChannel")], condition: c.all(c.compare("generation","=",":generation"),c.compare("inviteOwner","=",":owner")), parameters: { ':generation': participation.generation, ':owner': participation.owner } } }] : [])
+      ] }, { abortSignal: this.abortSignal });
+      else await this.db.put(put, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && ['ConditionalCheckFailedException','TransactionCanceledException'].includes(error.name)) throw new AppError('settings_conflict'); throw error; }
   }
   async saveKnowledge(config: GroupConfig, previous: KnowledgeCatalog, next: KnowledgeCatalog, actor: string, request?: KnowledgeRequest): Promise<string[]> {
     requireAdmin(config, actor);
     const prior = validateCatalog(previous, config);
-    const Item = validateCatalog(next, config);
-    delete Item.wikiVersion;
-    delete Item.wikiDocuments;
-    delete Item.withheldManualIds;
+    const item = validateCatalog(next, config);
+    delete item.wikiVersion;
+    delete item.wikiDocuments;
+    delete item.withheldManualIds;
     if (next.version !== previous.version + 1) throw new AppError('invalid_knowledge');
-    const historyWrites = await this.manualHistoryWrites(config, prior, Item);
-    const manualChange = await this.wiki.manualKnowledgeChange(config, prior, Item);
+    const historyWrites = await this.manualHistoryWrites(config, prior, item);
+    const manualChange = await this.wiki.manualKnowledgeChange(config, prior, item);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':now': Math.floor(Date.now()/1000) } } },
+      await this.db.transaction({ operations: [
+        { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':now': Math.floor(Date.now()/1000) } } },
         ...(request ? [
-          { ConditionCheck: { TableName: this.table, Key: { pk: `knowledge-user#${actor}` }, ...this.knowledgeRequestCondition(config, request), ConditionExpression: this.knowledgeRequestCondition(config, request).ConditionExpression + ' AND (attribute_not_exists(noticeUntil) OR noticeUntil <= :now)' } },
-          { Update: { TableName: this.table, Key: { pk: `knowledge#${request.requestId}` }, ...this.knowledgeRequestCondition(config, request), UpdateExpression: 'SET #result = :saved, wikiTasks = :tasks', ConditionExpression: this.knowledgeRequestCondition(config, request).ConditionExpression + ' AND (attribute_not_exists(#result) OR #result = :pending)', ExpressionAttributeNames: { '#result': 'status' }, ExpressionAttributeValues: { ...this.knowledgeRequestCondition(config, request).ExpressionAttributeValues, ':saved': 'saved', ':pending': 'pending', ':tasks': manualChange.tasks } } }
+          { check: { namespace: this.table, key: { pk: `knowledge-user#${actor}` }, ...this.knowledgeRequestCondition(config, request), condition: c.all(this.knowledgeRequestCondition(config, request).condition,c.group(c.any(c.absent("noticeUntil"),c.compare("noticeUntil","<=",":now")))) } },
+          { update: { namespace: this.table, key: { pk: `knowledge#${request.requestId}` }, ...this.knowledgeRequestCondition(config, request), changes: [c.set("#result",":saved"),c.set("wikiTasks",":tasks")], condition: c.all(this.knowledgeRequestCondition(config, request).condition,c.group(c.any(c.absent("#result"),c.compare("#result","=",":pending")))), fields: { '#result': 'status' }, parameters: { ...this.knowledgeRequestCondition(config, request).parameters, ':saved': 'saved', ':pending': 'pending', ':tasks': manualChange.tasks } } }
         ] : []),
-        { Put: { TableName: this.table, Item, ConditionExpression: '#version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': previous.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
+        { put: { namespace: this.table, item, condition: c.all(c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': previous.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
         ...historyWrites, manualChange.write
-      ] }), { abortSignal: this.abortSignal });
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
     return manualChange.tasks;
   }
-  private async manualHistoryWrites(config:GroupConfig,previous:KnowledgeCatalog,next:KnowledgeCatalog):Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
-    const writes:NonNullable<TransactWriteCommandInput['TransactItems']>=[];
+  private async manualHistoryWrites(config:GroupConfig,previous:KnowledgeCatalog,next:KnowledgeCatalog):Promise<DocumentOperation[]> {
+    const writes:DocumentOperation[]=[];
     for(const document of previous.documents) {
       const current=next.documents.find(item=>item.id===document.id);
       if(current && isDeepStrictEqual(current,document)) continue;
@@ -138,11 +139,11 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
         const clauses=fields.map((field,index)=>{
           names[`#f${index}`]=field;
           const value=(existing as unknown as Record<string,unknown>)[field];
-          if(value===undefined) return `attribute_not_exists(#f${index})`;
-          values[`:f${index}`]=value;return `#f${index} = :f${index}`;
+          if(value===undefined) return c.absent(`#f${index}`);
+          values[`:f${index}`]=value;return c.compare(`#f${index}`, '=', `:f${index}`);
         });
-        writes.push({ConditionCheck:{TableName:this.table,Key:{pk:original.pk},ConditionExpression:clauses.join(' AND '),ExpressionAttributeNames:names,ExpressionAttributeValues:values}});
-      } else writes.push({Put:{TableName:this.table,Item:original,ConditionExpression:'attribute_not_exists(pk)'}});
+        writes.push({check:{namespace:this.table,key:{pk:original.pk},condition:c.all(...clauses),fields:names,parameters:values}});
+      } else writes.push({put:{namespace:this.table,item:original,condition: c.absent("pk")}});
       const headKey=`wiki-manual-history#${document.id}`,head=await this.get<ManualHistory>(headKey);
       if(head) {
         requireIdentity(head,config);
@@ -150,8 +151,8 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
       }
       const node:ManualHistory={pk:`${headKey}#${document.version}`,environmentId:config.environmentId,appId:config.appId,teamId:config.teamId,version:document.version,...(head ? {previousVersion:head.version}: {})};
       if(Buffer.byteLength(JSON.stringify(original))>wikiLimits.itemBytes) throw new AppError('invalid_knowledge');
-      writes.push({Put:{TableName:this.table,Item:node,ConditionExpression:'attribute_not_exists(pk)'}},
-        {Put:{TableName:this.table,Item:{...node,pk:headKey},ConditionExpression:head ? '#v = :v AND environmentId = :env AND appId = :app AND teamId = :team':'attribute_not_exists(pk)',...(head ? {ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':head.version,':env':config.environmentId,':app':config.appId,':team':config.teamId}}: {})}});
+      writes.push({put:{namespace:this.table,item:node,condition: c.absent("pk")}},
+        {put:{namespace:this.table,item:{...node,pk:headKey},condition: (head ? c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")) : c.absent("pk")),...(head ? {fields:{'#v':'version'},parameters:{':v':head.version,':env':config.environmentId,':app':config.appId,':team':config.teamId}}: {})}});
     }
     for(const document of next.documents) {
       const prior=previous.documents.find(item=>item.id===document.id);
@@ -159,14 +160,14 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
       if(document.version!==next.version) throw new AppError('invalid_knowledge');
       const original=manualSource(document,config);
       if(Buffer.byteLength(JSON.stringify(original))>wikiLimits.itemBytes) throw new AppError('invalid_knowledge');
-      writes.push({Put:{TableName:this.table,Item:original,ConditionExpression:'attribute_not_exists(pk)'}});
+      writes.push({put:{namespace:this.table,item:original,condition: c.absent("pk")}});
     }
     if(writes.length>48 || Buffer.byteLength(JSON.stringify(writes))>1000000) throw new AppError('invalid_knowledge');
     return writes;
   }
   private knowledgeRequestCondition(identity: GroupIdentity, request: KnowledgeRequest) {
-    return { ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND requestId = :request AND expiresAt > :now',
-      ExpressionAttributeValues: { ':environment': identity.environmentId, ':app': identity.appId, ':team': identity.teamId, ':actor': request.userId, ':request': request.requestId, ':now': Math.floor(Date.now()/1000) } };
+    return { condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("requestId","=",":request"),c.compare("expiresAt",">",":now")),
+      parameters: { ':environment': identity.environmentId, ':app': identity.appId, ':team': identity.teamId, ':actor': request.userId, ':request': request.requestId, ':now': Math.floor(Date.now()/1000) } };
   }
   async requestKnowledge(config: GroupConfig, request: KnowledgeRequest): Promise<void> {
     requireAdmin(config, request.userId);
@@ -176,68 +177,68 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     const previous = await this.get<KnowledgeHead>(key);
     if (previous) requireIdentity(previous, config);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Put: { TableName: this.table, Item: { pk: `knowledge#${request.requestId}`, ...request, status: 'pending' }, ConditionExpression: 'attribute_not_exists(pk)' } },
-        { Put: { TableName: this.table, Item: { pk: key, environmentId: config.environmentId, appId: config.appId, teamId: config.teamId, requestId: request.requestId, userId: request.userId, expiresAt: request.expiresAt },
-          ConditionExpression: previous ? 'requestId = :previous AND (attribute_not_exists(noticeUntil) OR noticeUntil <= :now)' : 'attribute_not_exists(pk)',
-          ...(previous ? { ExpressionAttributeValues: { ':previous': previous.requestId, ':now': Math.floor(Date.now()/1000) } } : {}) } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': request.userId, ':now': Math.floor(Date.now()/1000) } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { put: { namespace: this.table, item: { pk: `knowledge#${request.requestId}`, ...request, status: 'pending' }, condition: c.absent("pk") } },
+        { put: { namespace: this.table, item: { pk: key, environmentId: config.environmentId, appId: config.appId, teamId: config.teamId, requestId: request.requestId, userId: request.userId, expiresAt: request.expiresAt },
+          condition: (previous ? c.all(c.compare("requestId","=",":previous"),c.group(c.any(c.absent("noticeUntil"),c.compare("noticeUntil","<=",":now")))) : c.absent("pk")),
+          ...(previous ? { parameters: { ':previous': previous.requestId, ':now': Math.floor(Date.now()/1000) } } : {}) } },
+        { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': request.userId, ':now': Math.floor(Date.now()/1000) } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async rejectKnowledge(config: GroupConfig, request: KnowledgeRequest, failureCode: string): Promise<void> {
     requireIdentity(request, config);
     const condition = this.knowledgeRequestCondition(config, request);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
-        { Update: { TableName: this.table, Key: { pk: `knowledge#${request.requestId}` }, ...condition, UpdateExpression: 'SET #result = :failed, failureCode = :code', ConditionExpression: condition.ConditionExpression + ' AND (attribute_not_exists(#result) OR #result = :pending)', ExpressionAttributeNames: { '#result': 'status' }, ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':failed': 'failed', ':pending': 'pending', ':code': failureCode } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
+        { update: { namespace: this.table, key: { pk: `knowledge#${request.requestId}` }, ...condition, changes: [c.set("#result",":failed"),c.set("failureCode",":code")], condition: c.all(condition.condition,c.group(c.any(c.absent("#result"),c.compare("#result","=",":pending")))), fields: { '#result': 'status' }, parameters: { ...condition.parameters, ':failed': 'failed', ':pending': 'pending', ':code': failureCode } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async reserveKnowledgeNotice(config: GroupConfig, catalog: KnowledgeCatalog, request: KnowledgeRequest, status: 'saved' | 'failed', owner: string): Promise<void> {
     requireAdmin(config, request.userId);
     const condition = this.knowledgeRequestCondition(config, request), now = Math.floor(Date.now()/1000);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: `knowledge-user#${request.userId}` }, ...condition, UpdateExpression: 'SET noticeUntil = :until, noticeOwner = :owner', ConditionExpression: condition.ConditionExpression + ' AND (attribute_not_exists(noticeUntil) OR noticeUntil <= :now)', ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':until': now+150, ':owner': owner } } },
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :until, publicationOwner = :owner, publicationKind = :kind', ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': request.userId, ':now': now, ':until': now+150, ':kind':'knowledge', ':owner': owner } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: `knowledge#${request.requestId}` }, ...condition, ConditionExpression: condition.ConditionExpression + ' AND #result = :result', ExpressionAttributeNames: { '#result': 'status' }, ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':result': status } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'knowledge' }, ConditionExpression: '#version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: `knowledge-user#${request.userId}` }, ...condition, changes: [c.set("noticeUntil",":until"),c.set("noticeOwner",":owner")], condition: c.all(condition.condition,c.group(c.any(c.absent("noticeUntil"),c.compare("noticeUntil","<=",":now")))), parameters: { ...condition.parameters, ':until': now+150, ':owner': owner } } },
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":until"),c.set("publicationOwner",":owner"),c.set("publicationKind",":kind")], condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': request.userId, ':now': now, ':until': now+150, ':kind':'knowledge', ':owner': owner } } },
+        { check: { namespace: this.table, key: { pk: `knowledge#${request.requestId}` }, ...condition, condition: c.all(condition.condition,c.compare("#result","=",":result")), fields: { '#result': 'status' }, parameters: { ...condition.parameters, ':result': status } } },
+        { check: { namespace: this.table, key: { pk: 'knowledge' }, condition: c.all(c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async releaseKnowledgeNotice(actor: string, owner: string): Promise<void> {
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: `knowledge-user#${actor}` }, UpdateExpression: 'SET noticeUntil = :zero REMOVE noticeOwner', ConditionExpression: 'noticeOwner = :owner', ExpressionAttributeValues: { ':zero': 0, ':owner': owner } } },
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :zero REMOVE publicationOwner, publicationKind', ConditionExpression: 'publicationOwner = :owner', ExpressionAttributeValues: { ':zero': 0, ':owner': owner } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: `knowledge-user#${actor}` }, changes: [c.set("noticeUntil",":zero"),c.remove("noticeOwner")], condition: c.compare("noticeOwner","=",":owner"), parameters: { ':zero': 0, ':owner': owner } } },
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")], condition: c.compare("publicationOwner","=",":owner"), parameters: { ':zero': 0, ':owner': owner } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async reservePublication(config: GroupConfig, catalog: KnowledgeCatalog, owner: string): Promise<void> {
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :until, publicationOwner = :owner, publicationKind = :kind', ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':until': Math.floor(Date.now()/1000) + 150, ':kind':'draft', ':owner': owner, ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':now': Math.floor(Date.now()/1000) } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'knowledge' }, ConditionExpression: '#version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":until"),c.set("publicationOwner",":owner"),c.set("publicationKind",":kind")], condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':until': Math.floor(Date.now()/1000) + 150, ':kind':'draft', ':owner': owner, ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':now': Math.floor(Date.now()/1000) } } },
+        { check: { namespace: this.table, key: { pk: 'knowledge' }, condition: c.all(c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
         ...this.wikiBoundary(catalog)
-      ] }), { abortSignal: this.abortSignal });
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async releasePublication(owner: string): Promise<void> {
     try {
-      await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :zero REMOVE publicationOwner, publicationKind', ConditionExpression: 'publicationOwner = :owner', ExpressionAttributeValues: { ':zero': 0, ':owner': owner } }), { abortSignal: this.abortSignal });
+      await this.db.update({ namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")], condition: c.compare("publicationOwner","=",":owner"), parameters: { ':zero': 0, ':owner': owner } }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('settings_conflict'); throw error; }
   }
   async claimAnswer(item: Consultation, patch: Partial<Consultation>, config: GroupConfig, catalog: KnowledgeCatalog): Promise<boolean> {
     const entries = Object.entries(patch);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: item.pk }, UpdateExpression: 'SET ' + entries.map((_, i) => `#p${i} = :p${i}`).join(', ') + ' REMOVE answerCancellation', ConditionExpression: '#status = :draft AND environmentId = :environment AND appId = :app AND teamId = :team AND configVersion = :version AND draftTs = :draftTs', ExpressionAttributeNames: { ...Object.fromEntries(entries.map(([key], i) => [`#p${i}`, key])), '#status': 'status' }, ExpressionAttributeValues: { ...Object.fromEntries(entries.map(([, value], i) => [`:p${i}`, value])), ':draft': 'draft', ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':version': config.version, ':draftTs': string(item.draftTs) } } },
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :until, publicationOwner = :owner, publicationKind = :kind', ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':until': patch.postingUntil, ':kind':'answer', ':owner': string(patch.postingOwner), ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':now': Math.floor(Date.now()/1000) } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'knowledge' }, ConditionExpression: '#version = :version AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: item.pk }, changes: [...entries.map((_, i) => c.set(`#p${i}`, `:p${i}`)), c.remove('answerCancellation')], condition: c.all(c.compare("#status","=",":draft"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("configVersion","=",":version"),c.compare("draftTs","=",":draftTs")), fields: { ...Object.fromEntries(entries.map(([key], i) => [`#p${i}`, key])), '#status': 'status' }, parameters: { ...Object.fromEntries(entries.map(([, value], i) => [`:p${i}`, value])), ':draft': 'draft', ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':version': config.version, ':draftTs': string(item.draftTs) } } },
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":until"),c.set("publicationOwner",":owner"),c.set("publicationKind",":kind")], condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':until': patch.postingUntil, ':kind':'answer', ':owner': string(patch.postingOwner), ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':now': Math.floor(Date.now()/1000) } } },
+        { check: { namespace: this.table, key: { pk: 'knowledge' }, condition: c.all(c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), fields: { '#version': 'version' }, parameters: { ':version': catalog.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } },
         ...this.wikiBoundary(catalog)
-      ] }), { abortSignal: this.abortSignal });
+      ] }, { abortSignal: this.abortSignal });
       return true;
     } catch (error) {
       if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') throw error;
@@ -254,9 +255,9 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     // 投稿前の失敗という証跡を先に残す。停止後の再配送も、投稿結果不明との区別を維持する。
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: item.pk }, ...condition, UpdateExpression: 'SET answerCancellation = :cancellation',
-          ConditionExpression: condition.ConditionExpression + ' AND (#status = :posting OR #status = :uncertain) AND postingOwner = :owner AND actorId = :actor AND postingUntil = :until AND attribute_not_exists(answerTs) AND (attribute_not_exists(answerCancellation) OR answerCancellation = :cancellation)',
-          ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':owner': cancellation.postingOwner, ':actor': cancellation.actorId, ':until': cancellation.postingUntil, ':posting': 'posting', ':uncertain': 'uncertain' } }), { abortSignal: this.abortSignal });
+        await this.db.update({ namespace: this.table, key: { pk: item.pk }, ...condition, changes: [c.set("answerCancellation",":cancellation")],
+          condition: c.all(condition.condition,c.all(c.group(c.any(c.compare("#status","=",":posting"),c.compare("#status","=",":uncertain"))),c.compare("postingOwner","=",":owner"),c.compare("actorId","=",":actor"),c.compare("postingUntil","=",":until"),c.absent("answerTs"),c.group(c.any(c.absent("answerCancellation"),c.compare("answerCancellation","=",":cancellation"))))),
+          fields: { '#status': 'status' }, parameters: { ...condition.parameters, ':owner': cancellation.postingOwner, ':actor': cancellation.actorId, ':until': cancellation.postingUntil, ':posting': 'posting', ':uncertain': 'uncertain' } }, { abortSignal: this.abortSignal });
         break;
       } catch (error) {
         const current = await this.get<Consultation>(item.pk);
@@ -268,8 +269,8 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     return this.recoverAnswerCancellation({ ...item, answerCancellation: cancellation });
   }
   private answerCancellationCondition(cancellation: AnswerCancellation) {
-    return { ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND configVersion = :version AND draftTs = :draftTs',
-      ExpressionAttributeValues: { ':environment': cancellation.environmentId, ':app': cancellation.appId, ':team': cancellation.teamId, ':version': cancellation.configVersion, ':draftTs': cancellation.draftTs, ':cancellation': cancellation } };
+    return { condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("configVersion","=",":version"),c.compare("draftTs","=",":draftTs")),
+      parameters: { ':environment': cancellation.environmentId, ':app': cancellation.appId, ':team': cancellation.teamId, ':version': cancellation.configVersion, ':draftTs': cancellation.draftTs, ':cancellation': cancellation } };
   }
   async recoverAnswerCancellation(item: Consultation): Promise<boolean> {
     const cancellation = item.answerCancellation;
@@ -280,16 +281,16 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
       if (!current || !isDeepStrictEqual(current.answerCancellation, cancellation) || current.environmentId !== cancellation.environmentId || current.appId !== cancellation.appId || current.teamId !== cancellation.teamId || current.configVersion !== cancellation.configVersion || current.draftTs !== cancellation.draftTs || current.answerTs) return false;
       if (current.status !== 'draft' && ((current.status !== 'posting' && current.status !== 'uncertain') || current.postingOwner !== cancellation.postingOwner || current.actorId !== cancellation.actorId || current.postingUntil !== cancellation.postingUntil)) return false;
       try {
-        if (current.status !== 'draft') await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: item.pk }, ...condition, UpdateExpression: 'SET #status = :draft REMOVE answer, actorId, postingOwner, postingUntil',
-          ConditionExpression: condition.ConditionExpression + ' AND answerCancellation = :cancellation AND (#status = :posting OR #status = :uncertain) AND postingOwner = :owner AND actorId = :actor AND postingUntil = :until AND attribute_not_exists(answerTs)',
-          ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':owner': cancellation.postingOwner, ':actor': cancellation.actorId, ':until': cancellation.postingUntil, ':draft': 'draft', ':posting': 'posting', ':uncertain': 'uncertain' } }), { abortSignal: this.abortSignal });
+        if (current.status !== 'draft') await this.db.update({ namespace: this.table, key: { pk: item.pk }, ...condition, changes: [c.set("#status",":draft"),c.remove("answer"),c.remove("actorId"),c.remove("postingOwner"),c.remove("postingUntil")],
+          condition: c.all(condition.condition,c.all(c.compare("answerCancellation","=",":cancellation"),c.group(c.any(c.compare("#status","=",":posting"),c.compare("#status","=",":uncertain"))),c.compare("postingOwner","=",":owner"),c.compare("actorId","=",":actor"),c.compare("postingUntil","=",":until"),c.absent("answerTs"))),
+          fields: { '#status': 'status' }, parameters: { ...condition.parameters, ':owner': cancellation.postingOwner, ':actor': cancellation.actorId, ':until': cancellation.postingUntil, ':draft': 'draft', ':posting': 'posting', ':uncertain': 'uncertain' } }, { abortSignal: this.abortSignal });
         // 案が同じ取消済み世代にあることもDB内で検証し、後続claimや別所有者の保護を解除しない。
-        await this.db.send(new TransactWriteCommand({ TransactItems: [
-          { ConditionCheck: { TableName: this.table, Key: { pk: item.pk }, ...condition, ConditionExpression: condition.ConditionExpression + ' AND answerCancellation = :cancellation AND #status = :draft AND attribute_not_exists(postingOwner) AND attribute_not_exists(answerTs)', ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ':draft': 'draft' } } },
-          { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :zero REMOVE publicationOwner, publicationKind',
-            ConditionExpression: 'publicationOwner = :owner AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND postingUntil = :until',
-            ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':zero': 0, ':owner': cancellation.postingOwner, ':version': cancellation.configVersion, ':environment': cancellation.environmentId, ':app': cancellation.appId, ':team': cancellation.teamId, ':until': cancellation.postingUntil } } }
-        ] }), { abortSignal: this.abortSignal });
+        await this.db.transaction({ operations: [
+          { check: { namespace: this.table, key: { pk: item.pk }, ...condition, condition: c.all(condition.condition,c.all(c.compare("answerCancellation","=",":cancellation"),c.compare("#status","=",":draft"),c.absent("postingOwner"),c.absent("answerTs"))), fields: { '#status': 'status' }, parameters: { ...condition.parameters, ':draft': 'draft' } } },
+          { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")],
+            condition: c.all(c.compare("publicationOwner","=",":owner"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("postingUntil","=",":until")),
+            fields: { '#version': 'version' }, parameters: { ':zero': 0, ':owner': cancellation.postingOwner, ':version': cancellation.configVersion, ':environment': cancellation.environmentId, ':app': cancellation.appId, ':team': cancellation.teamId, ':until': cancellation.postingUntil } } }
+        ] }, { abortSignal: this.abortSignal });
         return true;
       } catch (error) {
         const saved = await this.get<Consultation>(item.pk), config = await this.get<GroupConfig>('roughmate');
@@ -314,12 +315,12 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     const expiresAt = Math.floor(Date.now() / 1000) + settingsRetentionSeconds;
     if (!Number.isSafeInteger(version) || version < 1) throw new AppError('invalid_input');
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Put: { TableName: this.table, Item: { pk, teamId: workspace.teamId, userId: workspace.ownerId, channelId, version, expiresAt, config: content, actorId: actor }, ConditionExpression: 'attribute_not_exists(pk)' } },
-        { Update: { TableName: this.table, Key: { pk: 'workspace' }, UpdateExpression: 'SET settingsVersion = :version, settingsRequestId = :request',
-          ConditionExpression: 'teamId = :team AND ownerId = :owner AND (attribute_not_exists(settingsNoticeUntil) OR settingsNoticeUntil <= :now) AND ' + (workspace.settingsVersion === undefined ? 'attribute_not_exists(settingsVersion)' : 'settingsVersion = :previous'),
-          ExpressionAttributeValues: { ':version': version, ':request': requestId, ':team': workspace.teamId, ':owner': workspace.ownerId, ':now': Math.floor(Date.now()/1000), ...(workspace.settingsVersion === undefined ? {} : { ':previous': workspace.settingsVersion }) } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { put: { namespace: this.table, item: { pk, teamId: workspace.teamId, userId: workspace.ownerId, channelId, version, expiresAt, config: content, actorId: actor }, condition: c.absent("pk") } },
+        { update: { namespace: this.table, key: { pk: 'workspace' }, changes: [c.set("settingsVersion",":version"),c.set("settingsRequestId",":request")],
+          condition: c.all(c.all(c.compare("teamId","=",":team"),c.compare("ownerId","=",":owner"),c.group(c.any(c.absent("settingsNoticeUntil"),c.compare("settingsNoticeUntil","<=",":now")))),(workspace.settingsVersion === undefined ? c.absent("settingsVersion") : c.compare("settingsVersion","=",":previous"))),
+          parameters: { ':version': version, ':request': requestId, ':team': workspace.teamId, ':owner': workspace.ownerId, ':now': Math.floor(Date.now()/1000), ...(workspace.settingsVersion === undefined ? {} : { ':previous': workspace.settingsVersion }) } } }
+      ] }, { abortSignal: this.abortSignal });
       this.abortSignal?.throwIfAborted();
       return { version, expiresAt };
     } catch (error) {
@@ -335,46 +336,46 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
   async rejectSettings(config: GroupConfig, actor: string, request: { id: string; version: number }, failureCode: string): Promise<void> {
     requireAdmin(config, actor);
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'workspace' }, ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request', ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':request': request.id } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor } } },
-        { Update: { TableName: this.table, Key: { pk: `settings#${request.id}` }, UpdateExpression: 'SET failureCode = if_not_exists(failureCode, :code)', ConditionExpression: 'teamId = :team AND #version = :version AND expiresAt > :now', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':now': Math.floor(Date.now()/1000), ':code': failureCode } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { check: { namespace: this.table, key: { pk: 'workspace' }, condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request")), parameters: { ':team': config.teamId, ':version': request.version, ':request': request.id } } },
+        { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor")), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor } } },
+        { update: { namespace: this.table, key: { pk: `settings#${request.id}` }, changes: [c.setAbsent("failureCode",":code")], condition: c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("expiresAt",">",":now")), fields: { '#version': 'version' }, parameters: { ':team': config.teamId, ':version': request.version, ':now': Math.floor(Date.now()/1000), ':code': failureCode } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async beginSettingsAttempt(config: GroupConfig, actor: string, request: { id: string; version: number }, owner: string): Promise<void> {
     requireAdmin(config, actor);
     const now = Math.floor(Date.now()/1000);
     await this.channelTransaction([
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'workspace' }, ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND (attribute_not_exists(settingsNoticeUntil) OR settingsNoticeUntil <= :now)', ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, actor) } },
-      { Update: { TableName: this.table, Key: { pk: `settings#${request.id}` }, UpdateExpression: 'SET attemptOwner = :owner, attemptUntil = :until REMOVE attemptRetryable', ConditionExpression: 'teamId = :team AND #version = :version AND actorId = :actor AND expiresAt > :now AND attribute_not_exists(failureCode) AND (attribute_not_exists(attemptOwner) OR (attemptUntil <= :now AND attemptRetryable = :true))', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':now': now, ':owner': owner, ':until': now+150, ':true': true } } }
+      { check: { namespace: this.table, key: { pk: 'workspace' }, condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.group(c.any(c.absent("settingsNoticeUntil"),c.compare("settingsNoticeUntil","<=",":now")))), parameters: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, actor) } },
+      { update: { namespace: this.table, key: { pk: `settings#${request.id}` }, changes: [c.set("attemptOwner",":owner"),c.set("attemptUntil",":until"),c.remove("attemptRetryable")], condition: c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("actorId","=",":actor"),c.compare("expiresAt",">",":now"),c.absent("failureCode"),c.group(c.any(c.absent("attemptOwner"),c.group(c.all(c.compare("attemptUntil","<=",":now"),c.compare("attemptRetryable","=",":true")))))), fields: { '#version': 'version' }, parameters: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':now': now, ':owner': owner, ':until': now+150, ':true': true } } }
     ]);
   }
   async retrySettingsAttempt(actor: string, request: { id: string; version: number }, owner: string): Promise<void> {
-    await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: `settings#${request.id}` }, UpdateExpression: 'SET attemptRetryable = :true', ConditionExpression: '#version = :version AND actorId = :actor AND attemptOwner = :owner AND attribute_not_exists(failureCode) AND expiresAt > :now', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': request.version, ':actor': actor, ':owner': owner, ':true': true, ':now': Math.floor(Date.now()/1000) } }), { abortSignal: this.abortSignal });
+    await this.db.update({ namespace: this.table, key: { pk: `settings#${request.id}` }, changes: [c.set("attemptRetryable",":true")], condition: c.all(c.compare("#version","=",":version"),c.compare("actorId","=",":actor"),c.compare("attemptOwner","=",":owner"),c.absent("failureCode"),c.compare("expiresAt",">",":now")), fields: { '#version': 'version' }, parameters: { ':version': request.version, ':actor': actor, ':owner': owner, ':true': true, ':now': Math.floor(Date.now()/1000) } }, { abortSignal: this.abortSignal });
   }
   async reserveSettingsNotice(config: GroupConfig, actor: string, request: { id: string; version: number }, owner: string): Promise<void> {
     requireAdmin(config, actor);
     const now = Math.floor(Date.now()/1000), until = now + 150;
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: 'workspace' }, UpdateExpression: 'SET settingsNoticeUntil = :until, settingsNoticeOwner = :owner', ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND (attribute_not_exists(settingsNoticeUntil) OR settingsNoticeUntil <= :now)', ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now, ':until': until, ':owner': owner } } },
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :until, publicationOwner = :owner, publicationKind = :kind', ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':now': now, ':until': until, ':kind':'settings', ':owner': owner } } },
-        { ConditionCheck: { TableName: this.table, Key: { pk: `settings#${request.id}` }, ConditionExpression: 'teamId = :team AND #version = :version AND expiresAt > :now AND attribute_exists(failureCode)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':now': now } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: 'workspace' }, changes: [c.set("settingsNoticeUntil",":until"),c.set("settingsNoticeOwner",":owner")], condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.group(c.any(c.absent("settingsNoticeUntil"),c.compare("settingsNoticeUntil","<=",":now")))), parameters: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now, ':until': until, ':owner': owner } } },
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":until"),c.set("publicationOwner",":owner"),c.set("publicationKind",":kind")], condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':now': now, ':until': until, ':kind':'settings', ':owner': owner } } },
+        { check: { namespace: this.table, key: { pk: `settings#${request.id}` }, condition: c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("expiresAt",">",":now"),c.exists("failureCode")), fields: { '#version': 'version' }, parameters: { ':team': config.teamId, ':version': request.version, ':now': now } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async releaseSettingsNotice(owner: string): Promise<void> {
     try {
-      await this.db.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: this.table, Key: { pk: 'workspace' }, UpdateExpression: 'SET settingsNoticeUntil = :zero REMOVE settingsNoticeOwner', ConditionExpression: 'settingsNoticeOwner = :owner', ExpressionAttributeValues: { ':zero': 0, ':owner': owner } } },
-        { Update: { TableName: this.table, Key: { pk: 'roughmate' }, UpdateExpression: 'SET postingUntil = :zero REMOVE publicationOwner, publicationKind', ConditionExpression: 'publicationOwner = :owner', ExpressionAttributeValues: { ':zero': 0, ':owner': owner } } }
-      ] }), { abortSignal: this.abortSignal });
+      await this.db.transaction({ operations: [
+        { update: { namespace: this.table, key: { pk: 'workspace' }, changes: [c.set("settingsNoticeUntil",":zero"),c.remove("settingsNoticeOwner")], condition: c.compare("settingsNoticeOwner","=",":owner"), parameters: { ':zero': 0, ':owner': owner } } },
+        { update: { namespace: this.table, key: { pk: 'roughmate' }, changes: [c.set("postingUntil",":zero"),c.remove("publicationOwner"),c.remove("publicationKind")], condition: c.compare("publicationOwner","=",":owner"), parameters: { ':zero': 0, ':owner': owner } } }
+      ] }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   private channelGroupCondition(config: GroupConfig, user: string) {
-    return { ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND (attribute_not_exists(postingUntil) OR postingUntil <= :now)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user, ':now': Math.floor(Date.now()/1000) } };
+    return { condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.group(c.any(c.absent("postingUntil"),c.compare("postingUntil","<=",":now")))), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user, ':now': Math.floor(Date.now()/1000) } };
   }
   async prepareChannelAuthorization(config: GroupConfig, user: string): Promise<ChannelAuthorization | undefined> {
     requireAdmin(config, user);
@@ -386,122 +387,146 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
     if (progress?.phase !== 'created' || progress.appId !== config.appId || progress.retiredAppId !== previous.appId) throw new AppError('group_boundary_mismatch');
     const current: ChannelAuthorization = { pk: previous.pk, environmentId: config.environmentId, appId: config.appId, teamId: config.teamId, userId: user, generation: randomBytes(16).toString('hex') };
     await this.channelTransaction([
-      { Put: { TableName: this.table, Item: current, ConditionExpression: 'environmentId = :environment AND appId = :retired AND teamId = :team AND userId = :actor AND generation = :generation', ExpressionAttributeValues: { ':environment': config.environmentId, ':retired': previous.appId, ':team': config.teamId, ':actor': user, ':generation': string(previous.generation) } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'setup#slack' }, ConditionExpression: '#phase = :created AND appId = :app AND retiredAppId = :retired', ExpressionAttributeNames: { '#phase': 'phase' }, ExpressionAttributeValues: { ':created': 'created', ':app': config.appId, ':retired': previous.appId } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, user) } }
+      { put: { namespace: this.table, item: current, condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":retired"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("generation","=",":generation")), parameters: { ':environment': config.environmentId, ':retired': previous.appId, ':team': config.teamId, ':actor': user, ':generation': string(previous.generation) } } },
+      { check: { namespace: this.table, key: { pk: 'setup#slack' }, condition: c.all(c.compare("#phase","=",":created"),c.compare("appId","=",":app"),c.compare("retiredAppId","=",":retired")), fields: { '#phase': 'phase' }, parameters: { ':created': 'created', ':app': config.appId, ':retired': previous.appId } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, user) } }
     ]);
     return current;
   }
   async beginChannelAuthorization(config: GroupConfig, state: ChannelAuthorizationState): Promise<void> {
     requireAdmin(config, state.userId); requireIdentity(state, config);
     await this.channelTransaction([
-      { Put: { TableName: this.table, Item: state, ConditionExpression: 'attribute_not_exists(pk)' } },
-      { Update: { TableName: this.table, Key: { pk: `channel-user#${state.userId}` }, UpdateExpression: 'SET environmentId = :environment, appId = :app, teamId = :team, userId = :user, generation = if_not_exists(generation, :generation), pendingGeneration = :generation, pending = :state', ConditionExpression: '(attribute_not_exists(pk) OR (environmentId = :environment AND appId = :app AND teamId = :team AND userId = :user)) AND attribute_not_exists(scopeExcess) AND attribute_not_exists(scopeCheckOwner) AND (attribute_not_exists(inviteUntil) OR inviteUntil <= :now)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':user': state.userId, ':generation': state.generation, ':state': state.pk, ':now': Math.floor(Date.now()/1000) } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
+      { put: { namespace: this.table, item: state, condition: c.absent("pk") } },
+      { update: { namespace: this.table, key: { pk: `channel-user#${state.userId}` }, changes: [c.set("environmentId",":environment"),c.set("appId",":app"),c.set("teamId",":team"),c.set("userId",":user"),c.setAbsent("generation",":generation"),c.set("pendingGeneration",":generation"),c.set("pending",":state")], condition: c.all(c.group(c.any(c.absent("pk"),c.group(c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":user"))))),c.absent("scopeExcess"),c.absent("scopeCheckOwner"),c.group(c.any(c.absent("inviteUntil"),c.compare("inviteUntil","<=",":now")))), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':user': state.userId, ':generation': state.generation, ':state': state.pk, ':now': Math.floor(Date.now()/1000) } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
     ]);
   }
   async consumeChannelAuthorization(config: GroupConfig, state: ChannelAuthorizationState): Promise<void> {
     requireAdmin(config, state.userId); requireIdentity(state, config);
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: state.pk }, UpdateExpression: 'SET #consumed = :true', ConditionExpression: 'generation = :generation AND userId = :user AND expiresAt > :now AND attribute_not_exists(#consumed)', ExpressionAttributeNames: { '#consumed': 'consumed' }, ExpressionAttributeValues: { ':true': true, ':generation': state.generation, ':user': state.userId, ':now': Math.floor(Date.now()/1000) } } },
-      { Update: { TableName: this.table, Key: { pk: `channel-user#${state.userId}` }, UpdateExpression: 'SET scopeCheckOwner = :state', ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND pendingGeneration = :generation AND pending = :state AND attribute_not_exists(scopeExcess) AND attribute_not_exists(scopeCheckOwner)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':generation': state.generation, ':state': state.pk } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
+      { update: { namespace: this.table, key: { pk: state.pk }, changes: [c.set("#consumed",":true")], condition: c.all(c.compare("generation","=",":generation"),c.compare("userId","=",":user"),c.compare("expiresAt",">",":now"),c.absent("#consumed")), fields: { '#consumed': 'consumed' }, parameters: { ':true': true, ':generation': state.generation, ':user': state.userId, ':now': Math.floor(Date.now()/1000) } } },
+      { update: { namespace: this.table, key: { pk: `channel-user#${state.userId}` }, changes: [c.set("scopeCheckOwner",":state")], condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("pendingGeneration","=",":generation"),c.compare("pending","=",":state"),c.absent("scopeExcess"),c.absent("scopeCheckOwner")), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':generation': state.generation, ':state': state.pk } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
     ]);
   }
   async finishChannelScopeCheck(config: GroupConfig, state: ChannelAuthorizationState): Promise<void> {
-    await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: `channel-user#${state.userId}` }, UpdateExpression: 'REMOVE scopeCheckOwner', ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND scopeCheckOwner = :state AND attribute_not_exists(scopeExcess)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':state': state.pk } }), { abortSignal: this.abortSignal });
+    await this.db.update({ namespace: this.table, key: { pk: `channel-user#${state.userId}` }, changes: [c.remove("scopeCheckOwner")], condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("scopeCheckOwner","=",":state"),c.absent("scopeExcess")), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':state': state.pk } }, { abortSignal: this.abortSignal });
   }
   async saveChannelAuthorization(config: GroupConfig, state: ChannelAuthorizationState, value: ChannelAuthorization): Promise<void> {
     requireIdentity(value, config); requireAdmin(config, value.userId);
     if (value.userId !== state.userId || value.generation !== state.generation) throw new AppError('forbidden');
     await this.channelTransaction([
-      { Put: { TableName: this.table, Item: value, ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND pendingGeneration = :generation AND pending = :state AND attribute_not_exists(scopeExcess) AND (attribute_not_exists(inviteUntil) OR inviteUntil <= :now)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':generation': state.generation, ':state': state.pk, ':now': Math.floor(Date.now()/1000) } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: state.pk }, ConditionExpression: 'generation = :generation AND #consumed = :true AND expiresAt > :now', ExpressionAttributeNames: { '#consumed': 'consumed' }, ExpressionAttributeValues: { ':generation': state.generation, ':true': true, ':now': Math.floor(Date.now()/1000) } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
+      { put: { namespace: this.table, item: value, condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("pendingGeneration","=",":generation"),c.compare("pending","=",":state"),c.absent("scopeExcess"),c.group(c.any(c.absent("inviteUntil"),c.compare("inviteUntil","<=",":now")))), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':generation': state.generation, ':state': state.pk, ':now': Math.floor(Date.now()/1000) } } },
+      { check: { namespace: this.table, key: { pk: state.pk }, condition: c.all(c.compare("generation","=",":generation"),c.compare("#consumed","=",":true"),c.compare("expiresAt",">",":now")), fields: { '#consumed': 'consumed' }, parameters: { ':generation': state.generation, ':true': true, ':now': Math.floor(Date.now()/1000) } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, state.userId) } }
     ]);
   }
   async rejectChannelAuthorizationScopes(config: GroupConfig, state: ChannelAuthorizationState): Promise<void> {
     requireAdmin(config, state.userId); requireIdentity(state, config);
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: `channel-user#${state.userId}` }, UpdateExpression: 'SET scopeExcess = :true', ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':true': true } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: state.pk }, ConditionExpression: 'generation = :generation AND #consumed = :true AND expiresAt > :now', ExpressionAttributeNames: { '#consumed': 'consumed' }, ExpressionAttributeValues: { ':generation': state.generation, ':true': true, ':now': Math.floor(Date.now()/1000) } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND environmentId = :environment AND appId = :app AND teamId = :team', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } }
+      { update: { namespace: this.table, key: { pk: `channel-user#${state.userId}` }, changes: [c.set("scopeExcess",":true")], condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor")), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': state.userId, ':true': true } } },
+      { check: { namespace: this.table, key: { pk: state.pk }, condition: c.all(c.compare("generation","=",":generation"),c.compare("#consumed","=",":true"),c.compare("expiresAt",">",":now")), fields: { '#consumed': 'consumed' }, parameters: { ':generation': state.generation, ':true': true, ':now': Math.floor(Date.now()/1000) } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId } } }
     ]);
   }
   async disconnectChannelAuthorization(config: GroupConfig, user: string, generation: string): Promise<void> {
     requireAdmin(config, user);
     await this.prepareChannelAuthorization(config, user);
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: `channel-user#${user}` }, UpdateExpression: 'SET environmentId = :environment, appId = :app, teamId = :team, userId = :actor, generation = :generation REMOVE cipher, iv, tag, tokenExpiresAt, pending, pendingGeneration', ConditionExpression: 'attribute_not_exists(pk) OR (environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user, ':generation': generation } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user } } }
+      { update: { namespace: this.table, key: { pk: `channel-user#${user}` }, changes: [c.set("environmentId",":environment"),c.set("appId",":app"),c.set("teamId",":team"),c.set("userId",":actor"),c.set("generation",":generation"),c.remove("cipher"),c.remove("iv"),c.remove("tag"),c.remove("tokenExpiresAt"),c.remove("pending"),c.remove("pendingGeneration")], condition: c.any(c.absent("pk"),c.group(c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor")))), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user, ':generation': generation } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor")), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': user } } }
     ]);
   }
   async reserveSettingsChannels(config: GroupConfig, actor: string, request: { id: string; version: number }, owner: string, generation?: string): Promise<void> {
     requireAdmin(config, actor);
     const now = Math.floor(Date.now()/1000);
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: 'workspace' }, UpdateExpression: 'SET settingsNoticeUntil = :until, settingsNoticeOwner = :owner', ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND (attribute_not_exists(settingsNoticeUntil) OR settingsNoticeUntil <= :now)', ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now, ':until': now+150, ':owner': owner } } },
-      { Update: { TableName: this.table, Key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, actor), UpdateExpression: 'SET postingUntil = :until, publicationOwner = :owner, publicationKind = :kind', ExpressionAttributeValues: { ...this.channelGroupCondition(config, actor).ExpressionAttributeValues, ':until': now+150, ':owner': owner, ':kind':'settings' } } },
-      { Update: { TableName: this.table, Key: { pk: `settings#${request.id}` }, UpdateExpression: 'SET attemptOwner = :owner' + (generation ? ', inviteGeneration = if_not_exists(inviteGeneration, :generation)' : ''), ConditionExpression: 'teamId = :team AND #version = :version AND actorId = :actor AND attemptOwner = :owner AND expiresAt > :now AND attribute_not_exists(failureCode)' + (generation ? ' AND (attribute_not_exists(inviteGeneration) OR inviteGeneration = :generation)' : ''), ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':now': now, ':owner': owner, ...(generation ? { ':generation': generation } : {}) } } },
-      ...(generation ? [{ Update: { TableName: this.table, Key: { pk: `channel-user#${actor}` }, UpdateExpression: 'SET inviteUntil = :until, inviteOwner = :owner', ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND generation = :generation AND attribute_exists(cipher) AND (attribute_not_exists(inviteUntil) OR inviteUntil <= :now)', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':generation': generation, ':until': now+150, ':now': now, ':owner': owner } } }] : [])
+      { update: { namespace: this.table, key: { pk: 'workspace' }, changes: [c.set("settingsNoticeUntil",":until"),c.set("settingsNoticeOwner",":owner")], condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.group(c.any(c.absent("settingsNoticeUntil"),c.compare("settingsNoticeUntil","<=",":now")))), parameters: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':now': now, ':until': now+150, ':owner': owner } } },
+      { update: { namespace: this.table, key: { pk: 'roughmate' }, ...this.channelGroupCondition(config, actor), changes: [c.set("postingUntil",":until"),c.set("publicationOwner",":owner"),c.set("publicationKind",":kind")], parameters: { ...this.channelGroupCondition(config, actor).parameters, ':until': now+150, ':owner': owner, ':kind':'settings' } } },
+      { update: { namespace: this.table, key: { pk: `settings#${request.id}` }, changes: [...[c.set("attemptOwner",":owner")],...(generation ? [c.setAbsent("inviteGeneration",":generation")] : [])], condition: c.all(c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("actorId","=",":actor"),c.compare("attemptOwner","=",":owner"),c.compare("expiresAt",">",":now"),c.absent("failureCode")),(generation ? c.group(c.any(c.absent("inviteGeneration"),c.compare("inviteGeneration","=",":generation"))) : undefined)), fields: { '#version': 'version' }, parameters: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':now': now, ':owner': owner, ...(generation ? { ':generation': generation } : {}) } } },
+      ...(generation ? [{ update: { namespace: this.table, key: { pk: `channel-user#${actor}` }, changes: [c.set("inviteUntil",":until"),c.set("inviteOwner",":owner")], condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("generation","=",":generation"),c.exists("cipher"),c.group(c.any(c.absent("inviteUntil"),c.compare("inviteUntil","<=",":now")))), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':generation': generation, ':until': now+150, ':now': now, ':owner': owner } } }] : [])
     ]);
   }
   async releaseChannelInvite(user: string, owner: string): Promise<void> {
-    await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: `channel-user#${user}` }, UpdateExpression: 'REMOVE inviteUntil, inviteOwner, inviteStartedChannel', ConditionExpression: 'inviteOwner = :owner', ExpressionAttributeValues: { ':owner': owner } }), { abortSignal: this.abortSignal });
+    await this.db.update({ namespace: this.table, key: { pk: `channel-user#${user}` }, changes: [c.remove("inviteUntil"),c.remove("inviteOwner"),c.remove("inviteStartedChannel")], condition: c.compare("inviteOwner","=",":owner"), parameters: { ':owner': owner } }, { abortSignal: this.abortSignal });
   }
   async startChannelInvite(config: GroupConfig, actor: string, request: { id: string; version: number }, owner: string, generation: string, channel: string): Promise<void> {
     requireAdmin(config, actor);
     const now = Math.floor(Date.now()/1000)+3;
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: `channel-user#${actor}` }, UpdateExpression: 'SET inviteStartedChannel = :channel', ConditionExpression: 'environmentId = :environment AND appId = :app AND teamId = :team AND userId = :actor AND generation = :generation AND attribute_exists(cipher) AND inviteOwner = :owner AND inviteUntil > :now', ExpressionAttributeValues: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':generation': generation, ':owner': owner, ':now': now, ':channel': channel } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'roughmate' }, ConditionExpression: 'attribute_not_exists(lifecycle) AND #version = :version AND environmentId = :environment AND appId = :app AND teamId = :team AND contains(adminIds, :actor) AND publicationOwner = :owner AND postingUntil > :now', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':owner': owner, ':now': now } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: 'workspace' }, ConditionExpression: 'teamId = :team AND settingsVersion = :version AND settingsRequestId = :request AND settingsNoticeOwner = :owner AND settingsNoticeUntil > :now', ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':owner': owner, ':now': now } } },
-      { ConditionCheck: { TableName: this.table, Key: { pk: `settings#${request.id}` }, ConditionExpression: 'teamId = :team AND #version = :version AND actorId = :actor AND attemptOwner = :owner AND attemptUntil > :now AND inviteGeneration = :generation AND expiresAt > :now AND attribute_not_exists(failureCode)', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':owner': owner, ':now': now, ':generation': generation } } }
+      { update: { namespace: this.table, key: { pk: `channel-user#${actor}` }, changes: [c.set("inviteStartedChannel",":channel")], condition: c.all(c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.compare("userId","=",":actor"),c.compare("generation","=",":generation"),c.exists("cipher"),c.compare("inviteOwner","=",":owner"),c.compare("inviteUntil",">",":now")), parameters: { ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':generation': generation, ':owner': owner, ':now': now, ':channel': channel } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.all(c.absent("lifecycle"),c.compare("#version","=",":version"),c.compare("environmentId","=",":environment"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"),c.contains("adminIds",":actor"),c.compare("publicationOwner","=",":owner"),c.compare("postingUntil",">",":now")), fields: { '#version': 'version' }, parameters: { ':version': config.version, ':environment': config.environmentId, ':app': config.appId, ':team': config.teamId, ':actor': actor, ':owner': owner, ':now': now } } },
+      { check: { namespace: this.table, key: { pk: 'workspace' }, condition: c.all(c.compare("teamId","=",":team"),c.compare("settingsVersion","=",":version"),c.compare("settingsRequestId","=",":request"),c.compare("settingsNoticeOwner","=",":owner"),c.compare("settingsNoticeUntil",">",":now")), parameters: { ':team': config.teamId, ':version': request.version, ':request': request.id, ':owner': owner, ':now': now } } },
+      { check: { namespace: this.table, key: { pk: `settings#${request.id}` }, condition: c.all(c.compare("teamId","=",":team"),c.compare("#version","=",":version"),c.compare("actorId","=",":actor"),c.compare("attemptOwner","=",":owner"),c.compare("attemptUntil",">",":now"),c.compare("inviteGeneration","=",":generation"),c.compare("expiresAt",">",":now"),c.absent("failureCode")), fields: { '#version': 'version' }, parameters: { ':team': config.teamId, ':version': request.version, ':actor': actor, ':owner': owner, ':now': now, ':generation': generation } } }
     ]);
   }
-  private async channelTransaction(items: NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']>): Promise<void> {
-    try { await this.db.send(new TransactWriteCommand({ TransactItems: items }), { abortSignal: this.abortSignal }); }
+  private async channelTransaction(items: DocumentOperation[]): Promise<void> {
+    try { await this.db.transaction({ operations: items }, { abortSignal: this.abortSignal }); }
     catch (error) { if (error instanceof Error && error.name === 'TransactionCanceledException') throw new AppError('settings_conflict'); throw error; }
   }
   async readSecrets(): Promise<Secrets> {
-    const result = await this.secrets.send(new GetSecretValueCommand({ SecretId: this.secretId, ...(this.secretVersion ? { VersionId: this.secretVersion } : {}) }), { abortSignal: this.abortSignal });
-    return validateSecrets(JSON.parse(string(result.SecretString)));
+    const result = await this.secrets.read({ id: this.secretId, ...(this.secretVersion ? { version: this.secretVersion } : {}) }, { abortSignal: this.abortSignal });
+    return validateSecrets(JSON.parse(string(result)));
   }
-  async saveSecrets(value: Secrets): Promise<void> {
-    await this.secrets.send(new PutSecretValueCommand({ SecretId: this.secretId, SecretString: JSON.stringify(validateSecrets(value)) }), { abortSignal: this.abortSignal });
+  async saveSecrets(value: Secrets, operationId: string = randomUUID()): Promise<void> {
+    await this.secrets.write({ id: this.secretId, operationId, value: JSON.stringify(validateSecrets(value)) }, { abortSignal: this.abortSignal });
+  }
+  async stageRootOAuthSecrets(base: Secrets, value: Secrets, attempt: string): Promise<void> {
+    const progress = await this.get<{ appId: string; phase: string; oauthAttempt: string; oauthVersion: string; oauthExpiresAt: number; oauthResult?: RootOAuthResult; scopeExcess?: boolean }>('setup#slack');
+    if (!progress || progress.appId !== base.appId || progress.phase !== 'created' || progress.scopeExcess || progress.oauthAttempt !== attempt || progress.oauthResult) throw new AppError('root_oauth_pending');
+    const receipt = value.rootOAuth;
+    if (!receipt) throw new AppError('root_oauth_pending');
+    const result = encryptRootOAuthResult(base, value, { environmentId: this.secretId, appId: base.appId, requestId: attempt, operationId: progress.oauthVersion, teamId: receipt.teamId, ownerId: receipt.ownerId, expiresAt: progress.oauthExpiresAt });
+    await this.channelTransaction([
+      { check: { namespace: this.table, key: { pk: 'workspace' }, condition: c.any(c.absent('pk'), c.group(c.all(c.compare('teamId', '=', ':team'), c.compare('ownerId', '=', ':owner')))), parameters: { ':team': receipt.teamId, ':owner': receipt.ownerId } } },
+      { update: { namespace: this.table, key: { pk: 'setup#slack' }, changes: [c.set('oauthResult', ':result')], condition: c.all(c.compare('appId', '=', ':app'), c.compare('phase', '=', ':created'), c.compare('oauthAttempt', '=', ':attempt'), c.compare('oauthVersion', '=', ':version'), c.compare('oauthExpiresAt', '=', ':expires'), c.absent('oauthResult'), c.absent('scopeExcess')), parameters: { ':app': base.appId, ':created': 'created', ':attempt': attempt, ':version': progress.oauthVersion, ':expires': progress.oauthExpiresAt, ':result': result } } }
+    ]);
+  }
+  async resumeRootOAuthSecrets(base: Secrets, attempt: string): Promise<Secrets> {
+    const progress = await this.get<{ appId: string; phase: string; oauthAttempt: string; oauthVersion: string; oauthExpiresAt: number; oauthResult?: RootOAuthResult; scopeExcess?: boolean }>('setup#slack');
+    if (!progress || progress.appId !== base.appId || progress.phase !== 'created' || progress.scopeExcess || progress.oauthAttempt !== attempt || !progress.oauthResult) throw new AppError('root_oauth_pending');
+    const value = decryptRootOAuthResult(base, progress.oauthResult, { environmentId: this.secretId, requestId: attempt, operationId: progress.oauthVersion, expiresAt: progress.oauthExpiresAt });
+    const group = await this.get('roughmate');
+    if (group) { const config = validateGroup(group); requireIdentity(config, { environmentId: this.secretId, appId: base.appId, teamId: progress.oauthResult.teamId }); if (config.lifecycle) throw new AppError('root_oauth_pending'); }
+    await this.channelTransaction([{ check: { namespace: this.table, key: { pk: 'setup#slack' }, condition: c.all(c.compare('appId', '=', ':app'), c.compare('phase', '=', ':created'), c.compare('oauthAttempt', '=', ':attempt'), c.compare('oauthVersion', '=', ':version'), c.compare('oauthExpiresAt', '=', ':expires'), c.compare('oauthExpiresAt', '>', ':now'), c.compare('oauthResult', '=', ':result'), c.absent('scopeExcess')), parameters: { ':app': base.appId, ':created': 'created', ':attempt': attempt, ':version': progress.oauthVersion, ':expires': progress.oauthExpiresAt, ':now': Math.floor(Date.now() / 1000), ':result': progress.oauthResult } } },
+      { check: { namespace: this.table, key: { pk: 'roughmate' }, condition: c.any(c.absent('pk'), c.group(c.all(c.compare('environmentId', '=', ':env'), c.compare('appId', '=', ':app'), c.compare('teamId', '=', ':team'), c.absent('lifecycle')))), parameters: { ':env': this.secretId, ':app': base.appId, ':team': progress.oauthResult.teamId } } }
+    ]);
+    await this.install({ teamId: progress.oauthResult.teamId, ownerId: progress.oauthResult.ownerId });
+    await this.saveSecrets(value, progress.oauthVersion);
+    return value;
   }
   async rejectRootScopes(appId: string): Promise<void> {
     try {
-      await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: 'setup#slack' }, UpdateExpression: 'SET scopeExcess = :true', ConditionExpression: 'appId = :app AND #phase = :created', ExpressionAttributeNames: { '#phase': 'phase' }, ExpressionAttributeValues: { ':app': appId, ':created': 'created', ':true': true } }), { abortSignal: this.abortSignal });
+      await this.db.update({ namespace: this.table, key: { pk: 'setup#slack' }, changes: [c.set("scopeExcess",":true")], condition: c.all(c.compare("appId","=",":app"),c.compare("#phase","=",":created")), fields: { '#phase': 'phase' }, parameters: { ':app': appId, ':created': 'created', ':true': true } }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('settings_conflict'); throw error; }
   }
   async beginRootOAuth(appId: string, pk: string, now: number): Promise<{ teamId?: string; ownerId?: string }> {
     const expected = await this.get<{ teamId?: string; ownerId?: string; expiresAt: number }>(pk);
     if (!expected || expected.expiresAt <= now) throw new AppError('invalid_state');
     await this.channelTransaction([
-      { Update: { TableName: this.table, Key: { pk: 'setup#slack' }, UpdateExpression: 'SET oauthAttempt = :attempt', ConditionExpression: 'appId = :app AND #phase = :created AND attribute_not_exists(scopeExcess) AND attribute_not_exists(oauthAttempt)', ExpressionAttributeNames: { '#phase': 'phase' }, ExpressionAttributeValues: { ':app': appId, ':created': 'created', ':attempt': pk } } },
-      { Delete: { TableName: this.table, Key: { pk }, ConditionExpression: 'expiresAt > :now', ExpressionAttributeValues: { ':now': now } } }
+      { update: { namespace: this.table, key: { pk: 'setup#slack' }, changes: [c.set("oauthAttempt",":attempt"),c.set("oauthVersion",":version"),c.set("oauthExpiresAt",":expires")], condition: c.all(c.compare("appId","=",":app"),c.compare("#phase","=",":created"),c.absent("scopeExcess"),c.absent("oauthAttempt"),c.absent("oauthResult")), fields: { '#phase': 'phase' }, parameters: { ':app': appId, ':created': 'created', ':attempt': pk, ':version': randomUUID(), ':expires': expected.expiresAt } } },
+      { delete: { namespace: this.table, key: { pk }, condition: c.compare("expiresAt",">",":now"), parameters: { ':now': now } } }
     ]);
     if (expected.teamId === undefined && expected.ownerId === undefined) return {};
     return { teamId: string(expected.teamId), ownerId: string(expected.ownerId) };
   }
   async finishRootOAuth(appId: string, attempt: string): Promise<void> {
-    await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: 'setup#slack' }, UpdateExpression: 'REMOVE oauthAttempt', ConditionExpression: 'appId = :app AND #phase = :created AND oauthAttempt = :attempt AND attribute_not_exists(scopeExcess)', ExpressionAttributeNames: { '#phase': 'phase' }, ExpressionAttributeValues: { ':app': appId, ':created': 'created', ':attempt': attempt } }), { abortSignal: this.abortSignal });
+    await this.db.update({ namespace: this.table, key: { pk: 'setup#slack' }, changes: [c.remove("oauthAttempt"),c.remove("oauthVersion"),c.remove("oauthExpiresAt"),c.remove("oauthResult")], condition: c.all(c.compare("appId","=",":app"),c.compare("#phase","=",":created"),c.compare("oauthAttempt","=",":attempt"),c.absent("scopeExcess")), fields: { '#phase': 'phase' }, parameters: { ':app': appId, ':created': 'created', ':attempt': attempt } }, { abortSignal: this.abortSignal });
   }
   async consumeState(pk: string, now: number): Promise<{ teamId?: string; ownerId?: string }> {
     try {
-      const result = await this.db.send(new DeleteCommand({ TableName: this.table, Key: { pk }, ConditionExpression: 'expiresAt > :now', ExpressionAttributeValues: { ':now': now }, ReturnValues: 'ALL_OLD' }), { abortSignal: this.abortSignal });
-      const value = object(result.Attributes);
+      const result = await this.db.delete({ namespace: this.table, key: { pk }, condition: c.compare("expiresAt",">",":now"), parameters: { ':now': now }, returnPrevious: 'ALL_OLD' }, { abortSignal: this.abortSignal });
+      const value = object(result.previous);
       if (value.teamId === undefined && value.ownerId === undefined) return {};
       return { teamId: string(value.teamId), ownerId: string(value.ownerId) };
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('invalid_state'); throw error; }
   }
   async install(workspace: Workspace): Promise<void> {
     try {
-      await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk: 'workspace' },
-        UpdateExpression: 'SET teamId = :team, ownerId = :owner',
-        ConditionExpression: 'attribute_not_exists(pk) OR (teamId = :team AND ownerId = :owner)',
-        ExpressionAttributeValues: { ':team': workspace.teamId, ':owner': workspace.ownerId } }), { abortSignal: this.abortSignal });
+      await this.db.update({ namespace: this.table, key: { pk: 'workspace' },
+        changes: [c.set("teamId",":team"),c.set("ownerId",":owner")],
+        condition: c.any(c.absent("pk"),c.group(c.all(c.compare("teamId","=",":team"),c.compare("ownerId","=",":owner")))),
+        parameters: { ':team': workspace.teamId, ':owner': workspace.ownerId } }, { abortSignal: this.abortSignal });
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('forbidden'); throw error; }
   }
   async transition(pk: string, from: Consultation['status'], patch: Partial<Consultation>, condition?: ConsultationCondition): Promise<boolean> {
@@ -515,19 +540,19 @@ export class Storage implements ConsultationStore, AnswerClaimStore, DraftPublic
       if(!item || item.status!==from) return false;
       return this.wiki.transitionReferences(item,from,patch,condition);
     }
-    const extra = dynamoConsultationCondition(condition);
+    const extra = documentConsultationCondition(condition);
     const entries = Object.entries(patch);
     const names = Object.fromEntries(entries.map(([key], i) => [`#p${i}`, key]));
     const values = Object.fromEntries(entries.map(([, value], i) => [`:p${i}`, value]));
     try {
-      await this.db.send(new UpdateCommand({ TableName: this.table, Key: { pk },
-        UpdateExpression: 'SET ' + entries.map((_, i) => `#p${i} = :p${i}`).join(', '),
-        ConditionExpression: '#status = :from' + (patch.draft!==undefined || patch.answer!==undefined ? ' AND attribute_not_exists(wikiErasedAt)' : '') + (extra ? ' AND ' + extra.expression : ''),
-        ExpressionAttributeNames: { ...names, '#status': 'status' }, ExpressionAttributeValues: { ...values, ':from': from, ...extra?.values } }), { abortSignal: this.abortSignal }); return true;
+      await this.db.update({ namespace: this.table, key: { pk },
+        changes: entries.map((_, i) => c.set(`#p${i}`, `:p${i}`)),
+        condition: c.all(c.compare('#status', '=', ':from'), patch.draft!==undefined || patch.answer!==undefined ? c.absent('wikiErasedAt') : undefined, extra?.condition),
+        fields: { ...names, '#status': 'status' }, parameters: { ...values, ':from': from, ...extra?.values } }, { abortSignal: this.abortSignal }); return true;
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return false; throw error; }
   }
-  private wikiBoundary(catalog: KnowledgeCatalog): NonNullable<import('@aws-sdk/lib-dynamodb').TransactWriteCommandInput['TransactItems']> {
+  private wikiBoundary(catalog: KnowledgeCatalog): DocumentOperation[] {
     if (catalog.wikiVersion === undefined) return [];
-    return [{ ConditionCheck: { TableName: this.table, Key: { pk: 'wiki' }, ConditionExpression: catalog.wikiVersion === 0 ? 'attribute_not_exists(pk)' : '(contentVersion = :v OR (attribute_not_exists(contentVersion) AND #v = :v)) AND environmentId = :env AND appId = :app AND teamId = :team', ...(catalog.wikiVersion ? { ExpressionAttributeNames: { '#v': 'version' }, ExpressionAttributeValues: { ':v': catalog.wikiVersion, ':env': catalog.environmentId, ':app': catalog.appId, ':team': catalog.teamId } } : {}) } }];
+    return [{ check: { namespace: this.table, key: { pk: 'wiki' }, condition: (catalog.wikiVersion === 0 ? c.absent("pk") : c.all(c.group(c.any(c.compare("contentVersion","=",":v"),c.group(c.all(c.absent("contentVersion"),c.compare("#v","=",":v"))))),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"))), ...(catalog.wikiVersion ? { fields: { '#v': 'version' }, parameters: { ':v': catalog.wikiVersion, ':env': catalog.environmentId, ':app': catalog.appId, ':team': catalog.teamId } } : {}) } }];
   }
 }

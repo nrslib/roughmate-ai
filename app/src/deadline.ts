@@ -1,10 +1,26 @@
 import { AppError } from './contracts.js';
 export const SLACK_REQUEST_BUDGET_MS = 2500;
+const requestExpirations = new WeakMap<AbortSignal, number>();
+export function requestTimeoutSignal(milliseconds: number): AbortSignal {
+  const expiresAt = Date.now() + milliseconds;
+  const signal = AbortSignal.timeout(milliseconds);
+  requestExpirations.set(signal, expiresAt);
+  return signal;
+}
+export function remainingRequestTime(signal: AbortSignal): number | undefined {
+  signal.throwIfAborted();
+  const expiresAt = requestExpirations.get(signal);
+  if (expiresAt === undefined) return undefined;
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) throw new AppError('request_deadline');
+  return remaining;
+}
 export class RequestDeadline {
   private controller = new AbortController();
   private timer: ReturnType<typeof setTimeout>;
   readonly signal = this.controller.signal;
   constructor(private expiresAt: number) {
+    requestExpirations.set(this.signal, expiresAt);
     this.timer = setTimeout(() => this.controller.abort(new AppError('request_deadline')), Math.max(0, expiresAt - Date.now()));
   }
   private check(): void {

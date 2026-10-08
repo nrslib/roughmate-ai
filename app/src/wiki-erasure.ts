@@ -1,12 +1,12 @@
+import { c, type DocumentStore, type DocumentOperation } from './document-store.js';
 import { wikiContentHash } from './wiki-content.js';
 import { randomUUID } from 'node:crypto';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { AppError } from './contracts.js';
 import { requireIdentity, type GroupIdentity, type KnowledgeDocument } from './groups.js';
 import { answerRetained, hashText, wikiLimits, type Citation, type WikiPage, type WikiRoot, type WorkState } from './wiki-model.js';
 import { promptCitation, promptDocument } from './wiki-provenance.js';
 
-type TransactionItems=NonNullable<TransactWriteCommandInput['TransactItems']>;
+type TransactionItems=DocumentOperation[];
 export interface ErasureHead extends GroupIdentity { pk:string; answerId:string; version:number; nodes:number; head?:string; purged?:true; cursor?:string; offset?:number; remaining?:number; }
 interface ErasureNode extends GroupIdentity { pk:string; answerId:string; targets:string[]; next?:string; }
 export interface SavedArtifact { pk:string; citations:Citation[]; }
@@ -65,12 +65,12 @@ export function transactionSize(items:TransactionItems):void {
   if(items.length>100 || Buffer.byteLength(JSON.stringify(items))>3500000) throw new AppError('wiki_transaction_capacity');
 }
 export class WikiErasureIndex {
-  constructor(private db:DynamoDBDocumentClient,private table:string,private signal?:AbortSignal) {}
+  constructor(private db:DocumentStore,private table:string,private signal?:AbortSignal) {}
   private async get<T>(pk:string):Promise<T|undefined> {
-    const result=await this.db.send(new GetCommand({TableName:this.table,Key:{pk},ConsistentRead:true}),{abortSignal:this.signal});return result.Item as T|undefined;
+    const result=await this.db.get({namespace:this.table,key:{pk},consistent:true}, {abortSignal:this.signal});return result.item as T|undefined;
   }
   rootCheck(root:WikiRoot):TransactionItems[number] {
-    return {ConditionCheck:{TableName:this.table,Key:{pk:'wiki'},ConditionExpression:root.version===0 ? 'attribute_not_exists(pk)':'#v = :v AND environmentId = :env AND appId = :app AND teamId = :team',...(root.version ? {ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':root.version,':env':root.environmentId,':app':root.appId,':team':root.teamId}}:{})}};
+    return {check:{namespace:this.table,key:{pk:'wiki'},condition: (root.version===0 ? c.absent("pk") : c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team"))),...(root.version ? {fields:{'#v':'version'},parameters:{':v':root.version,':env':root.environmentId,':app':root.appId,':team':root.teamId}}:{})}};
   }
   async head(root:WikiRoot,answerId:string):Promise<ErasureHead|undefined> {
     const head=await this.get<ErasureHead>(erasureKey(answerId));
@@ -81,7 +81,7 @@ export class WikiErasureIndex {
     return head;
   }
   putHead(next:ErasureHead,previous:ErasureHead|undefined):TransactionItems[number] {
-    return {Put:{TableName:this.table,Item:next,ConditionExpression:previous ? '#v = :v AND environmentId = :env AND appId = :app AND teamId = :team':'attribute_not_exists(pk)',...(previous ? {ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':previous.version,':env':previous.environmentId,':app':previous.appId,':team':previous.teamId}}:{})}};
+    return {put:{namespace:this.table,item:next,condition: (previous ? c.all(c.compare("#v","=",":v"),c.compare("environmentId","=",":env"),c.compare("appId","=",":app"),c.compare("teamId","=",":team")) : c.absent("pk")),...(previous ? {fields:{'#v':'version'},parameters:{':v':previous.version,':env':previous.environmentId,':app':previous.appId,':team':previous.teamId}}:{})}};
   }
   async reserve(root:WikiRoot,artifacts:SavedArtifact[]):Promise<void> {
     const targets=new Map<string,{citation:Citation;keys:Set<string>}>();
@@ -104,10 +104,10 @@ export class WikiErasureIndex {
         if(previous?.purged) throw new AppError('wiki_retention_expired');
         const pk=`wiki-erasure-node#${hashText(id+randomUUID())}`,node:ErasureNode={pk,...identity(root),answerId:id,targets:[...target.keys],...(previous?.head ? {next:previous.head}:{})};
         if(Buffer.byteLength(JSON.stringify(node))>wikiLimits.erasureNodeBytes) throw new AppError('wiki_erasure_index_capacity');
-        writes.push({Put:{TableName:this.table,Item:node,ConditionExpression:'attribute_not_exists(pk)'}},this.putHead({pk:erasureKey(id),...identity(root),answerId:id,version:(previous?.version ?? 0)+1,nodes:(previous?.nodes ?? 0)+1,head:pk},previous));
+        writes.push({put:{namespace:this.table,item:node,condition: c.absent("pk")}},this.putHead({pk:erasureKey(id),...identity(root),answerId:id,version:(previous?.version ?? 0)+1,nodes:(previous?.nodes ?? 0)+1,head:pk},previous));
       }
       transactionSize(writes);
-      try {await this.db.send(new TransactWriteCommand({TransactItems:writes}),{abortSignal:this.signal});}
+      try {await this.db.transaction({operations:writes}, {abortSignal:this.signal});}
       catch(error) {if(error instanceof Error && error.name==='TransactionCanceledException') throw new AppError('wiki_conflict');throw error;}
     }
   }

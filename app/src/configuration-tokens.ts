@@ -1,7 +1,7 @@
+import type { SecretStore } from './runtime-ports.js';
+import { c, type DocumentStore } from './document-store.js';
+import { runtime } from './runtime.js';
 import { randomUUID } from 'node:crypto';
-import { SecretsManagerClient, GetSecretValueCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { AppError, object, string, type Workspace } from './contracts.js';
 import { slackClient } from './slack.js';
 import { Storage } from './storage.js';
@@ -10,24 +10,24 @@ import { configurationKey } from './registration.js';
 interface ConfigurationTokens { token: string; refreshToken: string; teamId: string; userId: string; exp: number; }
 export interface ConfigurationStatus { pk: typeof configurationKey; version: string; phase: 'ready' | 'rotating' | 'disconnected'; nextVersion?: string; }
 export class ConfigurationAccess {
-  private secrets: SecretsManagerClient;
-  private db: DynamoDBDocumentClient;
+  private secrets: SecretStore;
+  private db: DocumentStore;
   constructor(private root: Storage, private table: string, private secret: string, region?: string) {
-    this.secrets = new SecretsManagerClient({ region, maxAttempts: 1 });
-    this.db = DynamoDBDocumentClient.from(new DynamoDBClient({ region, maxAttempts: 1 }));
+    this.secrets = runtime().secrets(region);
+    this.db = runtime().documents(region);
   }
   private async read(version: string): Promise<ConfigurationTokens> {
-    const result = await this.secrets.send(new GetSecretValueCommand({ SecretId: this.secret, VersionId: version }));
-    const value = object(JSON.parse(string(result.SecretString)));
+    const result = await this.secrets.read({ id: this.secret, version: version });
+    const value = object(JSON.parse(string(result)));
     for (const key of ['token','refreshToken','teamId','userId']) string(value[key]);
     if (!Number.isSafeInteger(value.exp)) throw new AppError('configuration_boundary');
     return value as unknown as ConfigurationTokens;
   }
   private async saveStatus(previous: ConfigurationStatus | undefined, next: ConfigurationStatus): Promise<void> {
     try {
-      await this.db.send(new PutCommand({ TableName: this.table, Item: next,
-        ConditionExpression: previous ? '#version = :version AND #phase = :phase' + (previous.phase === 'rotating' ? ' AND nextVersion = :nextVersion' : '') : 'attribute_not_exists(pk)',
-        ...(previous ? { ExpressionAttributeNames: { '#version': 'version', '#phase': 'phase' }, ExpressionAttributeValues: { ':version': previous.version, ':phase': previous.phase, ...(previous.phase === 'rotating' ? { ':nextVersion': previous.nextVersion } : {}) } } : {}) }));
+      await this.db.put({ namespace: this.table, item: next,
+        condition: (previous ? c.all(c.all(c.compare("#version","=",":version"),c.compare("#phase","=",":phase")),(previous.phase === 'rotating' ? c.compare("nextVersion","=",":nextVersion") : undefined)) : c.absent("pk")),
+        ...(previous ? { fields: { '#version': 'version', '#phase': 'phase' }, parameters: { ':version': previous.version, ':phase': previous.phase, ...(previous.phase === 'rotating' ? { ':nextVersion': previous.nextVersion } : {}) } } : {}) });
     } catch (error) { if (error instanceof Error && error.name === 'ConditionalCheckFailedException') throw new AppError('configuration_busy'); throw error; }
   }
   private verify(tokens: ConfigurationTokens, workspace: Workspace, allowExpired = false): void {
@@ -54,7 +54,7 @@ export class ConfigurationAccess {
     await this.saveStatus(previous, intent);
     // 入力accessは本人確認に使わず、公式rotateが返すidentityと有効期限を照合する。
     const verified = await this.exchange(refreshToken, workspace);
-    await this.secrets.send(new PutSecretValueCommand({ SecretId: this.secret, ClientRequestToken: version, SecretString: JSON.stringify(verified) }));
+    await this.secrets.write({ id: this.secret, operationId: version, value: JSON.stringify(verified) });
     await this.saveStatus(intent, { pk: configurationKey, phase: 'ready', version });
   }
   async token(force: boolean): Promise<string> {
@@ -80,7 +80,7 @@ export class ConfigurationAccess {
     await this.saveStatus(previous, intent);
     // refreshは一回性のため、通信や保存の結果が不明なら旧tokenで再呼出ししない。
     const next = await this.exchange(tokens.refreshToken, workspace);
-    await this.secrets.send(new PutSecretValueCommand({ SecretId: this.secret, ClientRequestToken: nextVersion, SecretString: JSON.stringify(next) }));
+    await this.secrets.write({ id: this.secret, operationId: nextVersion, value: JSON.stringify(next) });
     await this.saveStatus(intent, { pk: configurationKey, phase: 'ready', version: nextVersion });
     return next.token;
   }

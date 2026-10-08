@@ -10,7 +10,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint app scripts"
+    "lint": "eslint app scripts",
+    "build:google-cloud": "node scripts/build-google.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewayv2": "^3.1143.0",
@@ -21,8 +22,13 @@
     "@aws-sdk/client-sqs": "^3.1143.0",
     "@aws-sdk/client-sts": "^3.1143.0",
     "@aws-sdk/lib-dynamodb": "^3.1143.0",
+    "@google-cloud/firestore": "^9.3.1",
+    "@google-cloud/firestore-api": "^0.2.0",
+    "@google-cloud/secret-manager": "^7.1.1",
+    "@google-cloud/tasks": "^7.2.1",
     "@inquirer/prompts": "^8.7.2",
     "@slack/web-api": "^8.1.1",
+    "google-gax": "^6.10.0",
     "openai": "^7.25.0"
   },
   "devDependencies": {

@@ -12,3 +12,8 @@ dist/
 .env.*
 .aws/
 .DS_Store
+
+.roughmate-google/
+.npm-cache/
+.npm-global-empty
+*.tfvars.json

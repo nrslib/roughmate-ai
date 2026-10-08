@@ -7,7 +7,7 @@ import { adoptionPath, answerProposalHash, proposalPagePath, requireAnswerPropos
 import { ChannelAudience } from './channel-audience.js';
 import { deviceShell, challengeForTarget, wikiDeviceScriptHash } from './wiki-web-device.js';
 import { randomBytes } from 'node:crypto';
-import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
+import type { HttpRequest, HttpResponse } from './http-contract.js';
 import { AppError, env, string, requireInstalledSecrets } from './contracts.js';
 import { Registrations } from './registration.js';
 import { BotMaintenance } from './bot-maintenance.js';
@@ -21,10 +21,11 @@ import { slackClient, requireBotIdentity } from './slack.js';
 import { maintainWiki, type WikiMaintenanceCommand } from './wiki-maintenance.js';
 import { html, wikiAnchor, wikiLayout, pageSlug, renderWikiBody } from './wiki-web-ui.js';
 import { diagnosticCode } from './diagnostics.js';
+import { requestTimeoutSignal } from './deadline.js';
 
 const headers={'content-type':'text/html; charset=utf-8','cache-control':'private, no-store, max-age=0','referrer-policy':'no-referrer','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",'permissions-policy':'camera=(), microphone=(), geolocation=()'};
-const response=(body:string,statusCode=200):APIGatewayProxyStructuredResultV2=>({statusCode,headers,body});
-const redirect=(location:string,cookies?:string[]):APIGatewayProxyStructuredResultV2=>({statusCode:303,headers:{...headers,location},cookies,body:''});
+const response=(body:string,statusCode=200):HttpResponse=>({statusCode,headers,body});
+const redirect=(location:string,cookies?:string[]):HttpResponse=>({statusCode:303,headers:{...headers,location},cookies,body:''});
 function unavailable(error:unknown):boolean {
   return error instanceof AppError && ['forbidden','missing_wiki_source','missing_wiki_answer','group_boundary_mismatch','wiki_retention_expired','wiki_membership_incomplete','wiki_history_incomplete','bot_not_in_channel'].includes(error.code) || ['slack_channel_not_found','slack_not_in_channel'].includes(diagnosticCode(error));
 }
@@ -35,8 +36,8 @@ async function visiblePages(pages:WikiPage[],history:WikiHistoryAccess,state?:{i
   for(const page of pages) {try {await history.page(page);visible.push(page);} catch(error) {if(!unavailable(error)) throw error;if(state && error instanceof AppError && ['wiki_membership_incomplete','wiki_history_incomplete'].includes(error.code)) state.incomplete=true;}}
   return visible;
 }
-export async function wikiWeb(event:APIGatewayProxyEventV2):Promise<APIGatewayProxyStructuredResultV2> {
-  const signal=AbortSignal.timeout(8500),registrations=new Registrations(env('TABLE_NAME'),env('SECRET_ARN'),signal),maintenance=new BotMaintenance(registrations,signal);
+export async function wikiWeb(event:HttpRequest):Promise<HttpResponse> {
+  const signal=requestTimeoutSignal(8500),registrations=new Registrations(env('TABLE_NAME'),env('SECRET_ARN'),signal),maintenance=new BotMaintenance(registrations,signal);
   const method=event.requestContext.http.method;
   try {
     const workspace=await registrations.root.workspace(),secrets=await registrations.root.readSecrets(),baseUrl=env('PUBLIC_URL');
@@ -117,7 +118,7 @@ export async function wikiWeb(event:APIGatewayProxyEventV2):Promise<APIGatewayPr
           const origin=await acceptBrowserProposalView(store,config,authenticated.session,contextCsrf,{...command,proposalKey:command.proposalKey,proposalHash:string(command.proposalHash)},values.has('editProposal'));
           const key=await acceptWikiAdoption(store,config,user,command.proposalKey,string(command.proposalHash),command.operation as 'confirm'|'reject',origin,policies);
           const location=base+'/adoption?key='+encodeURIComponent(key);
-          try {await enqueueWikiAdoption(config,route[2],user,key);}
+          try {await enqueueWikiAdoption(config,route[2],user,key,signal);}
           catch {
             return {...output('Wiki更新指示の受付','<p>指示は保存済みで、検査・更新待ちです。配送結果を確認できません。再採用せず、処理結果を確認し、Homeの「今すぐ同期」で同じ指示を再開してください。</p>'),headers:{...headers,'x-wiki-location':location}};
           }
@@ -283,7 +284,7 @@ export async function wikiWeb(event:APIGatewayProxyEventV2):Promise<APIGatewayPr
     return response(wikiLayout(retry ? '内容を再確認してください':'Wikiを開けません',`<p>${retry ? '資料またはWikiが更新されました。最新のページを開き直して、内容を確認してから再操作してください。':code==='wiki_capacity' ? '保存容量に収まりません。既存ページと更新案は保持しています。本文を短くするか、不要な重複を統合してください。':code==='bot_stopped' ? 'Botは停止しています。アーカイブは読み取り専用です。':code==='wiki_login_required' || code==='wiki_device_required' || code==='invalid_state' ? '本人確認の期限が切れたか、認証を確認できません。Slack HomeからWikiを開き直してください。':'閲覧権限または資料の有効性を確認できません。Slack HomeからWikiを開き直してください。'}</p>`),retry ? 409:unavailable(error) ? 404:code==='wiki_login_required' || code==='wiki_device_required' ? 401:400);
   }
 }
-function readForm(event:APIGatewayProxyEventV2):URLSearchParams {
+function readForm(event:HttpRequest):URLSearchParams {
   if(!event.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) throw new AppError('invalid_input');
   const raw=event.isBase64Encoded ? Buffer.from(string(event.body),'base64').toString('utf8'):string(event.body);
   if(Buffer.byteLength(raw)>wikiLimits.wikiBytes*3+16384) throw new AppError('invalid_input');

@@ -11,7 +11,7 @@ export function answerProposalHash(checkpoint:WikiCheckpoint):string {
   return wikiContentHash([checkpoint.pk,checkpoint.environmentId,checkpoint.appId,checkpoint.teamId,checkpoint.inputId,checkpoint.targets,checkpoint.approval]);
 }
 function wikiBotPath(config:GroupConfig):string {
-  const child=/\/bots\/([a-f0-9]{32})\/runtime-/.exec(config.environmentId);
+  const child=/(?:\/bots\/|-bot-)([a-f0-9]{32})(?:\/runtime-|-runtime$)/.exec(config.environmentId);
   return '/wiki/'+(child ? 'bots/'+child[1]:'root');
 }
 export function proposalPath(config:GroupConfig,key:string):string {

@@ -42,7 +42,7 @@ export function settingsView(config: GroupConfig): View {
 export async function publishHome(client: WebClient, _workspace: Workspace, user: string, notice: string, config?: GroupConfig, extra: KnownBlock[] = [], channelAuthorization?: 'pending' | 'scope_excess'): Promise<void> {
   const blocks: KnownBlock[] = [...(config ? [{ type: 'header' as const, text: { type: 'plain_text' as const, text: config.name } }, { type: 'section' as const, text: { type: 'plain_text' as const, text: config.description || '所属・説明は未設定です。' } }] : []), { type: 'section', text: { type: 'mrkdwn', text: notice } }];
   if(config && process.env.PUBLIC_URL) {
-    const child=/\/bots\/([a-f0-9]{32})\/runtime-/.exec(config.environmentId);
+    const child=/(?:\/bots\/|-bot-)([a-f0-9]{32})(?:\/runtime-|-runtime$)/.exec(config.environmentId);
     const url=env('PUBLIC_URL')+'/wiki/'+(child ? 'bots/'+child[1]:'root');
     blocks.push({type:'actions',elements:[{type:'button',action_id:'open_wiki_web',text:{type:'plain_text',text:'Wikiを開く'},url}]});
     if(!child && user===_workspace.ownerId) blocks.push({type:'actions',elements:[{type:'button',action_id:'open_wiki_archives',text:{type:'plain_text',text:'削除したBotのアーカイブ'},url:env('PUBLIC_URL')+'/wiki/archives'}]});

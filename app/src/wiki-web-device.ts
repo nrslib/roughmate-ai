@@ -1,27 +1,27 @@
 import { createHash, createHmac, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
-import type { APIGatewayProxyEventV2 } from 'aws-lambda';
+import type { HttpRequest } from './http-contract.js';
 import { AppError, type Secrets } from './contracts.js';
 
 export const wikiDeviceCookie='__Host-roughmate-wiki';
-function sessionId(event:APIGatewayProxyEventV2):string {
+function sessionId(event:HttpRequest):string {
   const values=(event.cookies ?? []).flatMap(value=>value.split(';')).map(value=>value.trim()).filter(value=>value.startsWith(wikiDeviceCookie+'='));
   const value=values.length===1 ? values[0].slice(wikiDeviceCookie.length+1):undefined;
   return value && /^[a-f0-9]{64}$/.test(value) ? value:'anonymous';
 }
-function bodyHash(event:APIGatewayProxyEventV2):string {
+function bodyHash(event:HttpRequest):string {
   const body=event.isBase64Encoded ? Buffer.from(event.body ?? '','base64'):Buffer.from(event.body ?? '');
   if(body.length>32000) throw new AppError('invalid_input');
   return createHash('sha256').update(body).digest('hex');
 }
-function requestBinding(event:APIGatewayProxyEventV2):string {
+function requestBinding(event:HttpRequest):string {
   return JSON.stringify([event.requestContext.http.method,event.rawPath,event.rawQueryString,bodyHash(event),createHash('sha256').update(sessionId(event)).digest('hex')]);
 }
 function mac(text:string,secrets:Secrets):string {return createHmac('sha256',secrets.signingSecret).update('wiki-device-v1:'+text).digest('hex');}
-export function deviceChallenge(event:APIGatewayProxyEventV2,secrets:Secrets):string {
+export function deviceChallenge(event:HttpRequest,secrets:Secrets):string {
   const payload=Buffer.from(JSON.stringify([Math.floor(Date.now()/1000),requestBinding(event)])).toString('base64url');
   return payload+'.'+mac(payload,secrets);
 }
-export function requireDeviceRequest(event:APIGatewayProxyEventV2,secrets:Secrets,expectedKey?:string):string {
+export function requireDeviceRequest(event:HttpRequest,secrets:Secrets,expectedKey?:string):string {
   const key=event.headers['x-wiki-device-key'],challenge=event.headers['x-wiki-device-challenge'],signature=event.headers['x-wiki-device-signature'];
   if(!key || key.length>300 || expectedKey && key!==expectedKey || !challenge || challenge.length>2000 || !signature || !/^[A-Za-z0-9_-]{86}$/.test(signature)) throw new AppError('wiki_device_required');
   try {
@@ -64,7 +64,7 @@ function deviceTarget(path:string):URL {
   if(url.pathname+url.search!==path || /\p{Cc}/u.test(decoded) || /%(?:2f|5c|3f|23|25)/i.test(url.pathname) || decodeURIComponent(url.pathname).split('/').some(segment=>segment==='.' || segment==='..')) throw new AppError('invalid_input');
   return url;
 }
-export function challengeForTarget(event:APIGatewayProxyEventV2,secrets:Secrets):string {
+export function challengeForTarget(event:HttpRequest,secrets:Secrets):string {
   const path=event.queryStringParameters?.path,method=event.queryStringParameters?.method,hash=event.queryStringParameters?.hash;
   if(!path || !['GET','POST'].includes(method ?? '') || !hash || !/^[a-f0-9]{64}$/.test(hash)) throw new AppError('invalid_input');
   const url=deviceTarget(path);

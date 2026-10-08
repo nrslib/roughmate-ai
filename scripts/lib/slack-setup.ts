@@ -31,13 +31,17 @@ export async function setupSlack(aws: SetupAws, descriptor: Descriptor, reinstal
   if (creating && !recoverAppId) throw new AppError('slack_creation_ambiguous');
   const retiredAppId = progress?.phase === 'deleted' ? progress.appId : progress?.retiredAppId;
   if (retiredAppId && recoverAppId === retiredAppId) throw new AppError('slack_target_mismatch');
-  const savedSecrets = progress?.phase === 'deleted' ? undefined : await aws.readSecrets(descriptor);
+  let savedSecrets = progress?.phase === 'deleted' ? undefined : await aws.readSecrets(descriptor);
   if (progress?.phase !== 'deleted' && progress?.oauthAttempt) {
+    if (!reinstall || !savedSecrets) throw new AppError('root_oauth_pending');
+    const store = fenced(new Storage(descriptor.tableName, descriptor.secretArn));
+    savedSecrets = await store.resumeRootOAuthSecrets(savedSecrets, string(progress.oauthAttempt));
+    const restoredWorkspace = await store.workspace();
     const receipt = savedSecrets?.rootOAuth;
-    if (!reinstall || !existingWorkspace || !savedSecrets || !receipt || savedSecrets.appId !== progress.appId || receipt?.requestId !== progress.oauthAttempt || !receipt.teamId || !receipt.ownerId || !savedSecrets.botToken || !savedSecrets.botUserId || !savedSecrets.botScopes || botScopes.some(scope => !savedSecrets.botScopes!.includes(scope)) || savedSecrets.botScopes.some(scope => !botScopes.some(expected => expected === scope)) || existingWorkspace?.teamId !== receipt.teamId || existingWorkspace.ownerId !== receipt.ownerId) throw new AppError('root_oauth_pending');
+    const restoredScopes = savedSecrets.botScopes;
+    if (!receipt || savedSecrets.appId !== progress.appId || receipt.requestId !== progress.oauthAttempt || !receipt.teamId || !receipt.ownerId || !savedSecrets.botToken || !savedSecrets.botUserId || !restoredScopes || botScopes.some(scope => !restoredScopes.includes(scope)) || restoredScopes.some(scope => !botScopes.some(expected => expected === scope)) || restoredWorkspace.teamId !== receipt.teamId || restoredWorkspace.ownerId !== receipt.ownerId) throw new AppError('root_oauth_pending');
     const auth = await slackClient(savedSecrets.botToken).auth.test();
     if (auth.ok !== true || 'error' in auth || auth.team_id !== receipt.teamId || auth.user_id !== savedSecrets.botUserId) throw new AppError('root_oauth_pending');
-    const store = fenced(new Storage(descriptor.tableName, descriptor.secretArn));
     if (!group) {
       const rawSeed = (await aws.db.send(new GetCommand({ TableName: descriptor.tableName, Key: { pk: 'roughmate#setup' }, ConsistentRead: true }))).Item;
       const seed = validateSetupSeed(rawSeed);

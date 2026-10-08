@@ -1,9 +1,19 @@
 {
   "schema": 1,
-  "sourceCommit": "e4411a4bca2345110c6d4d2ddb8e53e77a1c066e",
-  "allowlistSha256": "5fa2550f1fa76b5628272d5a51f802eb6c07f67fe9c4cb4fd7191383e8a4a804",
-  "retiredPathsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "sourceCommit": "7919c7c09a6dca526d7fbab9dfe52e07ff321405",
+  "allowlistSha256": "01502e3da885b74cd277a846e416e4192320805c741e26e9ab41f7e779189541",
+  "retiredPathsSha256": "b92cd203969f05ba980a37897b932a09b5389194c54bf1769db9b6032a6e4c65",
   "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "6301602b9122542b6b311d08f0c0305cc6596c5c11f22a6f54b7ed8326ae2252",
+      "mode": "100644"
+    },
+    {
+      "path": ".gcloudignore",
+      "sha256": "6301602b9122542b6b311d08f0c0305cc6596c5c11f22a6f54b7ed8326ae2252",
+      "mode": "100644"
+    },
     {
       "path": ".gitattributes",
       "sha256": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da",
@@ -11,7 +21,7 @@
     },
     {
       "path": ".gitignore",
-      "sha256": "a19c393236d4922824c0ad4e9e06b7f9ab4b89618fc71b6fe6dccbbe3c8db91f",
+      "sha256": "78fcb591bd7548b3021f64afb894a4dcdafcb8686cd788629767a18a95203b3a",
       "mode": "100644"
     },
     {
@@ -21,7 +31,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "76b47a716faa0d2f9a4cce57223c10f6b4dc9c1f1607282ccb2c1fd02f07c826",
+      "sha256": "9674b9bd682be795db97e29366705bc93cdfae2a8d941e163ee827d498d8d9a0",
       "mode": "100644"
     },
     {
@@ -40,13 +50,18 @@
       "mode": "100644"
     },
     {
-      "path": "app/src/aws-consultation-condition.ts",
-      "sha256": "b9b836f837426bb21acaa859a0d0241e401400176a5ee631c6c835411ec041b3",
+      "path": "app/src/aws-document-store.ts",
+      "sha256": "52b53cc9a64d490a4987178e21c5e2292267a271b431ea405adcbae2b7d9d7a2",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/aws-runtime.ts",
+      "sha256": "c625a7d9716d1ad0cf6b062b2be527bb61f4dbc0ad1616cc5bcb4f7c374baba0",
       "mode": "100644"
     },
     {
       "path": "app/src/bot-maintenance.ts",
-      "sha256": "3d6058ed09847a94be9d41beb5f2fd33a0edc77ceafbddb63918ecdf30246ede",
+      "sha256": "98aaa6e26fdb2264566a09b4ba03baae3fb3f3a2741d13f022e71a94f2315396",
       "mode": "100644"
     },
     {
@@ -66,7 +81,12 @@
     },
     {
       "path": "app/src/configuration-tokens.ts",
-      "sha256": "0e4badebabb43b9bc748ccf9c9d79d08e936dd45b451c96bd060e1e1307b1c09",
+      "sha256": "5167f5f00361cce73d7ad840e66f401df57aa03dea299ccfb37fddace708397b",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/consultation-condition.ts",
+      "sha256": "9e044d644788d00ad20a08b962f9882ff615a8cd26b72b7f9ddef806e5569594",
       "mode": "100644"
     },
     {
@@ -86,12 +106,37 @@
     },
     {
       "path": "app/src/deadline.ts",
-      "sha256": "ac741275a3a1719e38e349fd9192d85d7401f8fdaf01b8f35398d589b10eb2b7",
+      "sha256": "ee247f205457cf8cad0943890be71f4bf18cfdb0a2b1a173994a64e95a8ed865",
       "mode": "100644"
     },
     {
       "path": "app/src/diagnostics.ts",
-      "sha256": "4b1baf6e964c286d0f54a2851b295de41ab0684c9702f3243470aa2107165046",
+      "sha256": "0531f5e92800e44c709ce22e9eb10da335602e2a9abfd20a8c359288223c18f7",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/document-store.ts",
+      "sha256": "ecc5e74e1a6f714e524dbae11e9f7f07a930ae0474dd6937b5bc8ec52e4bca61",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/firestore-document-store.ts",
+      "sha256": "0fd9a6bc80affaa6fc8115b9dc20ed65c5a4f726438528c727ede992f3d7f268",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/google-cloud-run.ts",
+      "sha256": "13d9e420a47f4b7eb8d55ef819b7443a614a3324c4f5f1462226e5abfd2e9ba2",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/google-rpc.ts",
+      "sha256": "c30d24107a915ba64e4be7ace5a4b17ffcbd9f24bb950286e99474420a778864",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/google-runtime.ts",
+      "sha256": "52d8d4f687663d25451840f0b8eae36c8663a83cc0f853f7947389d69c89f471",
       "mode": "100644"
     },
     {
@@ -100,8 +145,13 @@
       "mode": "100644"
     },
     {
+      "path": "app/src/http-contract.ts",
+      "sha256": "6403e0c8523348ad5c3e11f8e0ad2fe0b5d3bb716875a984974288a97966bc7b",
+      "mode": "100644"
+    },
+    {
       "path": "app/src/http.ts",
-      "sha256": "5d1ff21ceffc130b208490b8521257494293d6cdf276d6e5f2d71dd6fa62ef45",
+      "sha256": "0c6807bd4cb091b5b7f9d40769ee390947f308ae365af3cd3252468c541244f7",
       "mode": "100644"
     },
     {
@@ -121,7 +171,7 @@
     },
     {
       "path": "app/src/provisioner.ts",
-      "sha256": "914b18a21325fa2f170875fde2d9dc16e25ff4a1eb3c4f2125283c83414319ef",
+      "sha256": "4c0764506ccc5b23e574aed5684f1e1b2be8719c54e0acbd94a5667dc1d7dd67",
       "mode": "100644"
     },
     {
@@ -131,7 +181,22 @@
     },
     {
       "path": "app/src/registration.ts",
-      "sha256": "ea37d9154faeaee50a847e7dcfb6cb0150f013b02c0dc61c81862a4432462df0",
+      "sha256": "e43b128709affd7394cb1de47c1137fc4ae9460762e66ab2f1c9645b07611483",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/root-oauth-result.ts",
+      "sha256": "b291cea3b994fdaa421a5c38e2fc910a2c91f316be8bd75d33899604047a0fad",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/runtime-ports.ts",
+      "sha256": "b2c06ee42920eccdb9e88d4f1b75a2efff4ad7736276ac3f1c9af5ac95495355",
+      "mode": "100644"
+    },
+    {
+      "path": "app/src/runtime.ts",
+      "sha256": "d9aaa98898224b14ba6a22bbc37c5498b0abfa0cd75b91e8023ea441441ea016",
       "mode": "100644"
     },
     {
@@ -141,12 +206,12 @@
     },
     {
       "path": "app/src/slack.ts",
-      "sha256": "818a31447b74e0af154c5a4cb532f4eba40ad56b0c095b89928b5471d6f8ce82",
+      "sha256": "e95f723ce449172d13f13ad7e63eeeeda91922ed058392e56b21931524d361bc",
       "mode": "100644"
     },
     {
       "path": "app/src/storage.ts",
-      "sha256": "b6198f6e7031508a4ac5baee44c4f46fa8d9768a9135c36f5fc74f94b25996e0",
+      "sha256": "4eae1b666fc93e654df8e9eb9624c5353950513c6594a5d6ad4ef0bb1c7a75bd",
       "mode": "100644"
     },
     {
@@ -166,7 +231,7 @@
     },
     {
       "path": "app/src/wiki-answer-proposal.ts",
-      "sha256": "b86a7b3fe74288973be34b8d0edba0b58916108850639253748cd74b673f306d",
+      "sha256": "73d2f9fb4e7a9e105ed28d5e6d0fd34ff94b61cb867a5aeed0cab5becdc9b5dd",
       "mode": "100644"
     },
     {
@@ -191,7 +256,7 @@
     },
     {
       "path": "app/src/wiki-erasure.ts",
-      "sha256": "580a9fce269475a7368d8cb4439a93b1f0b9beaa8e1ab2ee236a8f7a8815bd6b",
+      "sha256": "3fde0f668ed64cb1e18952081fe3ba7644ee34e818d284c17e6e5fe23763293b",
       "mode": "100644"
     },
     {
@@ -221,7 +286,7 @@
     },
     {
       "path": "app/src/wiki-queue.ts",
-      "sha256": "98c3f145d67c2b5457be54081e4d1af6fb65bf4f9a5d24af7b0336c6a7f1fbb5",
+      "sha256": "53c49a3cf5e866f4911db0f3cc2b898dc3af29df0ffaeaee2b92765e3704d377",
       "mode": "100644"
     },
     {
@@ -231,12 +296,12 @@
     },
     {
       "path": "app/src/wiki-runner.ts",
-      "sha256": "4068f04807512881b6410a7b6365de275fe2bf99bfce9bb637306a1c8c75fa13",
+      "sha256": "d0fe9852b7ae2df7c4f93c6a52444c0f4396e8353c1ccb28aca0f9cd26f65187",
       "mode": "100644"
     },
     {
       "path": "app/src/wiki-storage.ts",
-      "sha256": "8073ca993fac182b1eb9851bb8d0ba1be1bfabca743ca16cf0c6f59574b5b574",
+      "sha256": "e2eb330d871751f12e10c8c85a1efa7ff44ab9642a69932b87be6312cfacd5ec",
       "mode": "100644"
     },
     {
@@ -261,12 +326,12 @@
     },
     {
       "path": "app/src/wiki-web-auth.ts",
-      "sha256": "09a5ca4e02d8c190f8dc16689b09ad1839ac2feb0fa7545c45c8f5e6d6fda074",
+      "sha256": "930c7fb510d655a00e178d48c9d6ba3336f380993b1c79426bf3c8901376f246",
       "mode": "100644"
     },
     {
       "path": "app/src/wiki-web-device.ts",
-      "sha256": "14cd2eba76dcb5240a17f5fac257920f43f9ab76a98f348ffd43da071329f242",
+      "sha256": "bad71ca3672970d80ce51f2200efddc62e8e65ded71bfdab72a30b188bfa8b00",
       "mode": "100644"
     },
     {
@@ -276,7 +341,7 @@
     },
     {
       "path": "app/src/wiki-web.ts",
-      "sha256": "a6a305a5e171eac4b87290b2d20f605db99b51bd77ccb25e568a6e77c90f10b2",
+      "sha256": "0c70a1bb8f8741866b042d2e0235f513d81133dde1ae53de35b83960a82551ff",
       "mode": "100644"
     },
     {
@@ -286,12 +351,17 @@
     },
     {
       "path": "app/src/worker.ts",
-      "sha256": "6374671363a2fc20bd038096d0d46801b01aab5f71faef0d1172a2f52e70959a",
+      "sha256": "7f55a5da69cc38393b39ed5370c8f6f4d2bf8cf35a821f90d35a7b717c92dbf7",
       "mode": "100644"
     },
     {
       "path": "app/src/workflow.ts",
       "sha256": "507eb5b8fc93c495eb1efd0009d30e0446c3f9df5e92b64d3c652eeda642102a",
+      "mode": "100644"
+    },
+    {
+      "path": "docs/google-cloud.md",
+      "sha256": "3bc51ae6d7a7f70b93854822b9cbeb05b7ca6e8256ceefd2238b5ba296363af9",
       "mode": "100644"
     },
     {
@@ -345,19 +415,59 @@
       "mode": "100644"
     },
     {
+      "path": "infra/google-cloud/.terraform.lock.hcl",
+      "sha256": "2064c0b3832c1cc8a0fe2d6cec6931d25317694d17da1b42259a28080d6db075",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/Dockerfile",
+      "sha256": "8dfffa8fa8602d2a344f700f176178d72a1b65346db04148d52ba25fc7565209",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/cloudbuild.yaml",
+      "sha256": "2529c966b053b1e88386c16f83bdc43634453920ea635fe9876d44ca29f7e81c",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/main.tf",
+      "sha256": "99ef7934f2736a289381d5e967a552a5004146740c7200494b187cfb7ac46b46",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/outputs.tf",
+      "sha256": "9517310adbaa566346a564eb291caf6e3b5fbfe64f5a8c70c565686736792cf6",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/variables.tf",
+      "sha256": "7faea4e566e026b77f5b4d846dacfb2680dd626062623c6700faeaba77ba45fb",
+      "mode": "100644"
+    },
+    {
+      "path": "infra/google-cloud/versions.tf",
+      "sha256": "df07521440f254d18fc989b6ef36374f4158df92babb177d3501da132a59266a",
+      "mode": "100644"
+    },
+    {
       "path": "package-lock.json",
-      "sha256": "53792ceabc51a7ea221d55f9ee737a2d576ed703ab8077b0fc610240cf773d21",
+      "sha256": "427924c9efa84c9d1b4c1e208425fb8c5c3c777402f480f84a422a94722339e6",
       "mode": "100644"
     },
     {
       "path": "package.json",
-      "sha256": "ca9cb36f10b26b996c5cedd43296ad456341da26fdc4d67f72a6c2994acdbec9",
+      "sha256": "feecf9eb5986072426da306b0d8fa80c345cd361cec1edd51f3a0a4db959421f",
       "mode": "100644"
     },
     {
       "path": "scripts/bootstrap-state",
       "sha256": "db8882e3992d911431ccf7581aa01cbbfddcda422655268b475df6df13495179",
       "mode": "100755"
+    },
+    {
+      "path": "scripts/build-google.mjs",
+      "sha256": "39ee7c0e69dbad36b4437b76560b39a2e113baeaccab44507323f74b21a13584",
+      "mode": "100644"
     },
     {
       "path": "scripts/build.mjs",
@@ -388,6 +498,16 @@
       "path": "scripts/destroy-aws",
       "sha256": "0de3510dcf4a532256a2559bae4a7133c9e35ad443da5f086130b0f1d90bf82c",
       "mode": "100755"
+    },
+    {
+      "path": "scripts/google-cloud",
+      "sha256": "2fb175ec1c1dec9bbb9296b6e4c70ac3a05a1ec8bad77f63e30de301a974151d",
+      "mode": "100755"
+    },
+    {
+      "path": "scripts/google-cloud.ts",
+      "sha256": "6ab681dfbd2fa2b2c3423d28576f378f7b021ad387f869d8ebbce192ea94f457",
+      "mode": "100644"
     },
     {
       "path": "scripts/iam-policies.ts",
@@ -427,6 +547,11 @@
     {
       "path": "scripts/lib/environment-lease.ts",
       "sha256": "24665a98b60fd3635f502809fe4f7329770d1df90197a097a30f9ca3658a850c",
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/lib/google-slack.ts",
+      "sha256": "d479747e0b6fac849edba5a804bf9716d8487ac5b16e6c2a72ba1333ad862c0d",
       "mode": "100644"
     },
     {
@@ -531,7 +656,7 @@
     },
     {
       "path": "scripts/lib/slack-setup.ts",
-      "sha256": "1d15bd81aa1817f0f1ff7084df0ff9d202e43a46fe034bb351fc2ee6a636d9c0",
+      "sha256": "147cadc7a3c2b69a41ff073de7e0af2f2fe81aded108eb02107a3cb154e9cf53",
       "mode": "100644"
     },
     {
